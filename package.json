@@ -3,31 +3,13 @@
   "version": "0.21.0",
   "description": "A MapLibre GL JS plugin for visualizing LiDAR point clouds using deck.gl",
   "type": "module",
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.mjs",
-  "types": "./dist/types/index.d.ts",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
-    ".": {
-      "import": {
-        "types": "./dist/types/index.d.ts",
-        "default": "./dist/index.mjs"
-      },
-      "require": {
-        "types": "./dist/types/index.d.ts",
-        "default": "./dist/index.cjs"
-      }
-    },
-    "./react": {
-      "import": {
-        "types": "./dist/types/react.d.ts",
-        "default": "./dist/react.mjs"
-      },
-      "require": {
-        "types": "./dist/types/react.d.ts",
-        "default": "./dist/react.cjs"
-      }
-    },
-    "./style.css": "./dist/maplibre-gl-lidar.css"
+    ".": "./src/index.ts",
+    "./react": "./src/react.ts",
+    "./style.css": "./src/index.css"
   },
   "files": [
     "dist",
