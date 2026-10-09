@@ -2,6 +2,7 @@ export {
   ColorSchemeProcessor,
   getClassificationName,
   getAvailableClassifications,
+  getAttributeValues,
   CLASSIFICATION_COLORS,
 } from './ColorScheme';
 export type { ColorOptions } from './ColorScheme';

@@ -1,6 +1,6 @@
 import type { PointCloudData } from '../loaders/types';
-import type { ColorScheme, ColorSchemeConfig, ColormapName, ColorRangeConfig } from '../core/types';
-import type { RGBColor, ColorRamp, ClassificationColorMap } from './types';
+import type { ColormapName, ColorRangeConfig, ColorScheme, ColorSchemeConfig } from '../core/types';
+import type { ClassificationColorMap, ColorRamp, RGBColor } from './types';
 import { computePercentileBounds } from '../utils/helpers';
 import { COLORMAPS } from './Colormaps';
 
@@ -81,6 +81,8 @@ export interface ColorResult {
 export class ColorSchemeProcessor {
   /** Last computed color bounds (for colorbar display) */
   private _lastComputedBounds?: { min: number; max: number };
+  /** Whether the categorical-not-implemented warning has been logged */
+  private _warnedCategorical = false;
 
   /**
    * Generates a color array for the point cloud based on the color scheme.
@@ -130,7 +132,7 @@ export class ColorSchemeProcessor {
           return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
       }
     } else {
-      return { colors: this._colorByCustom(data, colors, scheme, colormap, colorRange, usePercentile) };
+      return this._colorByCustom(data, colors, scheme, colormap, colorRange, usePercentile);
     }
   }
 
@@ -207,31 +209,14 @@ export class ColorSchemeProcessor {
       zValues[i] = data.positions[i * 3 + 2] ?? 0;
     }
 
-    // Compute data bounds
+    // Use the header bounds rather than scanning every Z value
     const dataBounds = {
       min: data.bounds?.minZ ?? 0,
       max: data.bounds?.maxZ ?? 1,
     };
 
-    // Compute color bounds based on configuration
-    const bounds = this._computeBounds(zValues, dataBounds, colorRange, usePercentile);
-    this._lastComputedBounds = bounds;
-
-    const { min: minZ, max: maxZ } = bounds;
-    const range = maxZ - minZ || 1;
     const ramp = COLORMAPS[colormap] || COLORMAPS.viridis;
-
-    for (let i = 0; i < data.pointCount; i++) {
-      const z = zValues[i];
-      const t = (z - minZ) / range;
-      const color = this._interpolateRamp(ramp, t);
-      colors[i * 4] = color[0];
-      colors[i * 4 + 1] = color[1];
-      colors[i * 4 + 2] = color[2];
-      colors[i * 4 + 3] = 255;
-    }
-
-    return { colors, bounds };
+    return this._colorByValues(data, colors, zValues, ramp, colorRange, usePercentile, dataBounds);
   }
 
   /**
@@ -256,35 +241,8 @@ export class ColorSchemeProcessor {
       return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
     }
 
-    // Compute data bounds
-    let minI = Infinity;
-    let maxI = -Infinity;
-    for (let i = 0; i < data.pointCount; i++) {
-      const intensity = data.intensities[i];
-      if (intensity < minI) minI = intensity;
-      if (intensity > maxI) maxI = intensity;
-    }
-    const dataBounds = { min: minI, max: maxI };
-
-    // Compute color bounds based on configuration
-    const bounds = this._computeBounds(data.intensities, dataBounds, colorRange, usePercentile);
-    this._lastComputedBounds = bounds;
-
-    const { min: minVal, max: maxVal } = bounds;
-    const range = maxVal - minVal || 1;
     const ramp = COLORMAPS[colormap] || COLORMAPS.gray;
-
-    for (let i = 0; i < data.pointCount; i++) {
-      const intensity = data.intensities[i];
-      const t = (intensity - minVal) / range;
-      const color = this._interpolateRamp(ramp, t);
-      colors[i * 4] = color[0];
-      colors[i * 4 + 1] = color[1];
-      colors[i * 4 + 2] = color[2];
-      colors[i * 4 + 3] = 255;
-    }
-
-    return { colors, bounds };
+    return this._colorByValues(data, colors, data.intensities, ramp, colorRange, usePercentile);
   }
 
   /**
@@ -344,28 +302,85 @@ export class ColorSchemeProcessor {
   }
 
   /**
-   * Applies a custom color scheme configuration.
+   * Applies a custom color scheme configuration, coloring by an arbitrary
+   * point attribute.
+   *
+   * `categorical` configs are not implemented yet and are drawn as gradients,
+   * with a one-time warning.
    *
    * @param data - Point cloud data
    * @param colors - Output color array
-   * @param _config - Custom color scheme config
-   * @param colormap - Colormap name to use
+   * @param config - Custom color scheme config
+   * @param colormap - Colormap name to use when the config has no colors
    * @param colorRange - Color range configuration
    * @param usePercentile - Legacy percentile flag
-   * @returns Color array
+   * @returns ColorResult with colors and computed bounds
    */
   private _colorByCustom(
     data: PointCloudData,
     colors: Uint8Array,
-    _config: ColorSchemeConfig,
+    config: ColorSchemeConfig,
     colormap: ColormapName,
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean
-  ): Uint8Array {
-    // For now, fall back to elevation for custom configs
-    // This can be extended to support custom gradients
-    const result = this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
-    return result.colors;
+  ): ColorResult {
+    if (config.type === 'categorical' && !this._warnedCategorical) {
+      // Warn once; this runs for every streamed node
+      this._warnedCategorical = true;
+      console.warn('Categorical color schemes are not implemented; drawing as a gradient');
+    }
+
+    const values = getAttributeValues(data, config.attribute);
+    if (!values) {
+      // Fall back to elevation if this point cloud lacks the attribute
+      return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
+    }
+
+    const ramp = parseColorRamp(config.colors) ?? COLORMAPS[colormap] ?? COLORMAPS.viridis;
+    const domain = config.domain ? { min: config.domain[0], max: config.domain[1] } : undefined;
+    return this._colorByValues(data, colors, values, ramp, colorRange, usePercentile, domain);
+  }
+
+  /**
+   * Colors points along a color ramp by per-point values.
+   *
+   * @param data - Point cloud data
+   * @param colors - Output color array
+   * @param values - Per-point values (length = data.pointCount)
+   * @param ramp - Color ramp to interpolate
+   * @param colorRange - Color range configuration
+   * @param usePercentile - Legacy percentile flag
+   * @param domain - Full range of the values; computed from `values` when omitted
+   * @returns ColorResult with colors and computed bounds
+   */
+  private _colorByValues(
+    data: PointCloudData,
+    colors: Uint8Array,
+    values: Float32Array,
+    ramp: ColorRamp,
+    colorRange?: ColorRangeConfig,
+    usePercentile?: boolean,
+    domain?: { min: number; max: number },
+  ): ColorResult {
+    const dataBounds = domain ?? computeValueBounds(values, data.pointCount);
+
+    // Compute color bounds based on configuration
+    const bounds = this._computeBounds(values, dataBounds, colorRange, usePercentile);
+    this._lastComputedBounds = bounds;
+
+    const { min, max } = bounds;
+    const range = max - min || 1;
+
+    for (let i = 0; i < data.pointCount; i++) {
+      const t = (values[i] - min) / range;
+      const color = this._interpolateRamp(ramp, t);
+      colors[i * 4] = color[0];
+      colors[i * 4 + 1] = color[1];
+      colors[i * 4 + 2] = color[2];
+      colors[i * 4 + 3] = 255;
+    }
+
+    return { colors, bounds };
   }
 
   /**
@@ -440,4 +455,59 @@ export function getAvailableClassifications(data: PointCloudData): Set<number> {
     }
   }
   return classifications;
+}
+
+/**
+ * Extracts an extra attribute's values as a Float32Array
+ *
+ * @param data - Point cloud data
+ * @param attribute - Attribute name (key into data.extraAttributes)
+ * @returns Per-point values, or undefined if the point cloud lacks the attribute
+ */
+export function getAttributeValues(data: PointCloudData, attribute: string): Float32Array | undefined {
+  const source = data.extraAttributes?.[attribute];
+  if (!source || source.length === 0) {
+    return undefined;
+  }
+  return source instanceof Float32Array ? source : Float32Array.from(source);
+}
+
+/**
+ * Computes the min and max of the first `count` values.
+ */
+function computeValueBounds(values: Float32Array, count: number): { min: number; max: number } {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const value = values[i];
+    if (value < min) {
+      min = value;
+    }
+    if (value > max) {
+      max = value;
+    }
+  }
+  return { min, max };
+}
+
+/**
+ * Parses CSS hex colors (`#rgb` or `#rrggbb`) into a color ramp.
+ *
+ * @returns The ramp, or undefined unless every color parses and there are at least two
+ */
+function parseColorRamp(hexColors?: string[]): ColorRamp | undefined {
+  if (!hexColors || hexColors.length < 2) {
+    return undefined;
+  }
+  const ramp: ColorRamp = [];
+  for (const hex of hexColors) {
+    const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+    if (!match) {
+      return undefined;
+    }
+    const digits = match[1].length === 3 ? match[1].replace(/./g, '$&$&') : match[1];
+    const n = parseInt(digits, 16);
+    ramp.push([ (n >> 16) & 255, (n >> 8) & 255, n & 255 ]);
+  }
+  return ramp;
 }
