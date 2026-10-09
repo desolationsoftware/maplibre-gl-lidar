@@ -462,6 +462,14 @@ export class PointCloudManager {
   }
 
   /**
+   * Gets the full range of the last gradient-colored values.
+   * Used as the slider range for absolute color range controls.
+   */
+  getLastDataBounds(): { min: number; max: number } | undefined {
+    return this._colorProcessor.getLastDataBounds();
+  }
+
+  /**
    * Gets merged point cloud data from all loaded point clouds.
    * Used for cross-section profile extraction.
    *

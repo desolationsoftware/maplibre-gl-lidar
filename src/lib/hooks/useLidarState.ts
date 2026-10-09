@@ -30,6 +30,7 @@ const DEFAULT_STATE: LidarState = {
   zOffset: 0,
   hiddenClassifications: new Set(),
   availableClassifications: new Set(),
+  availableAttributes: new Set(),
   terrainEnabled: false,
 };
 

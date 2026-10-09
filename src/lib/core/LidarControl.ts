@@ -28,17 +28,9 @@ import { MetadataPanel } from '../gui/MetadataPanel';
 import { CrossSectionPanel } from '../gui/CrossSectionPanel';
 import { CrossSectionTool } from '../tools/CrossSectionTool';
 import { ElevationProfileExtractor } from '../tools/ElevationProfileExtractor';
-import { generateId, getFilename, computePercentileBounds } from '../utils/helpers';
-import {
-  createLidarSharePayload,
-  createLidarShareUrl,
-  parseLidarSharePayloadFromUrl,
-} from '../utils/share-url';
-import {
-  getAvailableClassifications,
-  getClassificationName,
-  type ClassificationStyles,
-} from '../colorizers/ColorScheme';
+import { computePercentileBounds, generateId, getFilename } from '../utils/helpers';
+import { createLidarSharePayload, createLidarShareUrl, parseLidarSharePayloadFromUrl } from '../utils/share-url';
+import { type ClassificationStyles, colorSchemeToDomainKey, getAvailableAttributeNames, getAvailableClassifications, getClassificationName, isGradientColorScheme } from '../colorizers/ColorScheme';
 
 /**
  * Default options for the LidarControl
@@ -200,6 +192,7 @@ export class LidarControl implements IControl {
       zOffset: this._options.zOffset ?? 0,
       hiddenClassifications: new Set(),
       availableClassifications: new Set(),
+      availableAttributes: new Set(),
       terrainEnabled: this._options.terrainEnabled ?? false,
     };
     this._loader = new PointCloudLoader();
@@ -839,6 +832,12 @@ export class LidarControl implements IControl {
         ...newClassifications,
       ]);
 
+      // Extract available extra attributes and merge with existing
+      const mergedAttributes = new Set([
+        ...this._state.availableAttributes,
+        ...getAvailableAttributeNames(data),
+      ]);
+
       // Update state (include z-offset values to trigger panel update)
       const pointClouds = [...this._state.pointClouds, info];
       this.setState({
@@ -846,6 +845,7 @@ export class LidarControl implements IControl {
         pointClouds,
         activePointCloudId: id,
         availableClassifications: mergedClassifications,
+        availableAttributes: mergedAttributes,
         zOffsetBase,
         zOffset: zOffset ?? this._state.zOffset,
         zOffsetEnabled,
@@ -922,6 +922,7 @@ export class LidarControl implements IControl {
             ? pointClouds[0]?.id || null
             : this._state.activePointCloudId,
         availableClassifications: new Set(),
+        availableAttributes: new Set(),
         hiddenClassifications: new Set(),
       };
 
@@ -937,6 +938,7 @@ export class LidarControl implements IControl {
         pointClouds: [],
         activePointCloudId: null,
         availableClassifications: new Set(),
+        availableAttributes: new Set(),
         hiddenClassifications: new Set(),
       });
       // Emit unload event for each removed point cloud
@@ -1032,6 +1034,19 @@ export class LidarControl implements IControl {
           // Only update if we have new classifications
           if (mergedClassifications.size > this._state.availableClassifications.size) {
             this.setState({ availableClassifications: mergedClassifications });
+          }
+        }
+
+        // Extract and merge extra attributes from streamed data
+        const newAttributes = getAvailableAttributeNames(data);
+        if (newAttributes.length > 0) {
+          const mergedAttributes = new Set([
+            ...this._state.availableAttributes,
+            ...newAttributes,
+          ]);
+          // Only update if we have new attributes
+          if (mergedAttributes.size > this._state.availableAttributes.size) {
+            this.setState({ availableAttributes: mergedAttributes });
           }
         }
       });
@@ -1269,6 +1284,18 @@ export class LidarControl implements IControl {
           ]);
           if (mergedClassifications.size > this._state.availableClassifications.size) {
             this.setState({ availableClassifications: mergedClassifications });
+          }
+        }
+
+        // Extract and merge extra attributes
+        const newAttributes = getAvailableAttributeNames(data);
+        if (newAttributes.length > 0) {
+          const mergedAttributes = new Set([
+            ...this._state.availableAttributes,
+            ...newAttributes,
+          ]);
+          if (mergedAttributes.size > this._state.availableAttributes.size) {
+            this.setState({ availableAttributes: mergedAttributes });
           }
         }
       });
@@ -1647,6 +1674,12 @@ export class LidarControl implements IControl {
         ...newClassifications,
       ]);
 
+      // Extract available extra attributes and merge with existing
+      const mergedAttributes = new Set([
+        ...this._state.availableAttributes,
+        ...getAvailableAttributeNames(data),
+      ]);
+
       // Update state (include z-offset values to trigger panel update)
       const pointClouds = [...this._state.pointClouds, info];
       this.setState({
@@ -1654,6 +1687,7 @@ export class LidarControl implements IControl {
         pointClouds,
         activePointCloudId: id,
         availableClassifications: mergedClassifications,
+        availableAttributes: mergedAttributes,
         zOffsetBase,
         zOffset: zOffset ?? this._state.zOffset,
         zOffsetEnabled,
@@ -1816,6 +1850,7 @@ export class LidarControl implements IControl {
         streamingActive: hasActiveStreaming,
         streamingProgress: hasActiveStreaming ? this._state.streamingProgress : undefined,
         availableClassifications: new Set(),
+        availableAttributes: new Set(),
         hiddenClassifications: new Set(),
       });
 
@@ -1869,6 +1904,7 @@ export class LidarControl implements IControl {
         streamingActive: false,
         streamingProgress: undefined,
         availableClassifications: new Set(),
+        availableAttributes: new Set(),
         hiddenClassifications: new Set(),
       });
 
@@ -1930,7 +1966,9 @@ export class LidarControl implements IControl {
 
   /**
    * Sets the color scheme.
-   * Automatically switches colormap and resets color range when changing between elevation and intensity.
+   * Automatically switches colormap when changing to or from intensity, and resets
+   * the color range when changing between gradient domains (elevation, intensity,
+   * or a custom attribute).
    *
    * @param scheme - Color scheme to apply
    */
@@ -1939,31 +1977,29 @@ export class LidarControl implements IControl {
     this._state.colorScheme = scheme;
     this._pointCloudManager?.setColorScheme(scheme);
 
-    // Auto-switch colormap and reset color range when changing between elevation and intensity
-    if (typeof scheme === 'string' && typeof previousScheme === 'string') {
-      const isNewElevationOrIntensity = scheme === 'elevation' || scheme === 'intensity';
-      const wasElevationOrIntensity = previousScheme === 'elevation' || previousScheme === 'intensity';
-      const switchedBetweenElevationAndIntensity = isNewElevationOrIntensity && wasElevationOrIntensity && scheme !== previousScheme;
+    // Auto-switch colormap and reset color range when changing between domains
+    const domainChanged =
+      isGradientColorScheme(scheme) &&
+      isGradientColorScheme(previousScheme) &&
+      colorSchemeToDomainKey(scheme) !== colorSchemeToDomainKey(previousScheme);
+    if (domainChanged) {
+      // Reset color range to default percentile mode
+      this._state.colorRange = {
+        mode: 'percentile',
+        percentileLow: 2,
+        percentileHigh: 98,
+      };
+      this._pointCloudManager?.setColorRange(this._state.colorRange);
+    }
 
-      if (switchedBetweenElevationAndIntensity) {
-        // Reset color range to default percentile mode
-        this._state.colorRange = {
-          mode: 'percentile',
-          percentileLow: 2,
-          percentileHigh: 98,
-        };
-        this._pointCloudManager?.setColorRange(this._state.colorRange);
-      }
-
-      if (scheme === 'intensity' && previousScheme !== 'intensity') {
-        // Switch to grayscale for intensity
-        this._state.colormap = 'gray';
-        this._pointCloudManager?.setColormap('gray');
-      } else if (scheme === 'elevation' && previousScheme === 'intensity') {
-        // Switch back to viridis for elevation
-        this._state.colormap = 'viridis';
-        this._pointCloudManager?.setColormap('viridis');
-      }
+    if (scheme === 'intensity' && previousScheme !== 'intensity') {
+      // Switch to grayscale for intensity
+      this._state.colormap = 'gray';
+      this._pointCloudManager?.setColormap('gray');
+    } else if (previousScheme === 'intensity' && isGradientColorScheme(scheme)) {
+      // Switch back to viridis when leaving intensity for another gradient
+      this._state.colormap = 'viridis';
+      this._pointCloudManager?.setColormap('viridis');
     }
 
     // Update computed color bounds for the new scheme
@@ -2310,22 +2346,24 @@ export class LidarControl implements IControl {
   private _updateComputedColorBounds(): void {
     if (this._state.pointClouds.length === 0) {
       this._state.computedColorBounds = undefined;
+      this._state.attributeDataBounds = undefined;
       return;
     }
+
+    // Attribute ranges aren't in the point cloud info, so take the colorizer's
+    this._state.attributeDataBounds =
+      typeof this._state.colorScheme === 'string' ? undefined : this._pointCloudManager?.getLastDataBounds();
 
     // Get the actual computed bounds from PointCloudManager
     // This returns the real bounds used for coloring (including actual percentile calculations)
     const actualBounds = this._pointCloudManager?.getLastComputedBounds();
     if (actualBounds) {
       this._state.computedColorBounds = actualBounds;
-    } else {
+    } else if (this._state.colorScheme === 'intensity') {
       // Fallback to data bounds if no computed bounds available
-      const colorScheme = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
-      if (colorScheme === 'intensity') {
-        this._state.computedColorBounds = this._getIntensityBounds();
-      } else {
-        this._state.computedColorBounds = this._getElevationBounds();
-      }
+      this._state.computedColorBounds = this._getIntensityBounds();
+    } else {
+      this._state.computedColorBounds = this._getElevationBounds();
     }
   }
 
@@ -2726,6 +2764,16 @@ export class LidarControl implements IControl {
    */
   getAvailableClassifications(): number[] {
     return Array.from(this._state.availableClassifications);
+  }
+
+  /**
+   * Gets the extra attribute names in the
+   * loaded data that can be used as a custom "color by" attribute.
+   *
+   * @returns Sorted array of available attribute names
+   */
+  getAvailableAttributes(): string[] {
+    return Array.from(this._state.availableAttributes).sort();
   }
 
   /**

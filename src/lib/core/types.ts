@@ -336,6 +336,8 @@ export interface LidarState {
   showColorbar: boolean;
   /** Computed color bounds for colorbar display */
   computedColorBounds?: { min: number; max: number };
+  /** Full range of the color-by attribute's values, when coloring by a custom attribute */
+  attributeDataBounds?: { min: number; max: number };
   /** Whether to use percentile range (2-98%) for elevation/intensity coloring */
   usePercentile: boolean;
   elevationRange: [number, number] | null;
@@ -364,6 +366,8 @@ export interface LidarState {
   hiddenClassifications: Set<number>;
   /** Set of classification codes present in loaded point cloud data */
   availableClassifications: Set<number>;
+  /** Set of extra attribute names present in loaded point cloud data */
+  availableAttributes: Set<string>;
   /** Per-code classification name/colour overrides (custom classes) */
   classificationStyles?: ClassificationStyles;
   /** Whether 3D terrain is enabled */

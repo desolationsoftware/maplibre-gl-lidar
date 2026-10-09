@@ -5,6 +5,14 @@ import { computePercentileBounds } from '../utils/helpers';
 import { COLORMAPS } from './Colormaps';
 
 /**
+ * Color for point clouds that lack the attribute a custom scheme colors by
+ */
+const MISSING_ATTRIBUTE_COLOR: RGBColor = [128, 128, 128];
+
+/** Prefix for custom attribute schemes */
+const ATTRIBUTE_OPTION_PREFIX = 'attr:';
+
+/**
  * ASPRS LAS classification standard colors
  */
 export const CLASSIFICATION_COLORS: ClassificationColorMap = {
@@ -81,6 +89,8 @@ export interface ColorResult {
 export class ColorSchemeProcessor {
   /** Last computed color bounds (for colorbar display) */
   private _lastComputedBounds?: { min: number; max: number };
+  /** Full range of the last gradient-colored values (for range controls) */
+  private _lastDataBounds?: { min: number; max: number };
   /** Whether the categorical-not-implemented warning has been logged */
   private _warnedCategorical = false;
 
@@ -143,6 +153,16 @@ export class ColorSchemeProcessor {
    */
   getLastComputedBounds(): { min: number; max: number } | undefined {
     return this._lastComputedBounds;
+  }
+
+  /**
+   * Gets the full range of the last gradient-colored values, before any
+   * color range or percentile clipping (for absolute range controls).
+   *
+   * @returns The last data bounds or undefined
+   */
+  getLastDataBounds(): { min: number; max: number } | undefined {
+    return this._lastDataBounds;
   }
 
   /**
@@ -332,8 +352,16 @@ export class ColorSchemeProcessor {
 
     const values = getAttributeValues(data, config.attribute);
     if (!values) {
-      // Fall back to elevation if this point cloud lacks the attribute
-      return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
+      // This point cloud lacks the attribute. Draw it in a neutral color, with
+      // no bounds, so it isn't mistaken for colored data and the colorbar keeps
+      // the range of a cloud that has the attribute.
+      for (let i = 0; i < data.pointCount; i++) {
+        colors[i * 4] = MISSING_ATTRIBUTE_COLOR[0];
+        colors[i * 4 + 1] = MISSING_ATTRIBUTE_COLOR[1];
+        colors[i * 4 + 2] = MISSING_ATTRIBUTE_COLOR[2];
+        colors[i * 4 + 3] = 255;
+      }
+      return { colors };
     }
 
     const ramp = parseColorRamp(config.colors) ?? COLORMAPS[colormap] ?? COLORMAPS.viridis;
@@ -363,6 +391,7 @@ export class ColorSchemeProcessor {
     domain?: { min: number; max: number },
   ): ColorResult {
     const dataBounds = domain ?? computeValueBounds(values, data.pointCount);
+    this._lastDataBounds = dataBounds;
 
     // Compute color bounds based on configuration
     const bounds = this._computeBounds(values, dataBounds, colorRange, usePercentile);
@@ -455,6 +484,62 @@ export function getAvailableClassifications(data: PointCloudData): Set<number> {
     }
   }
   return classifications;
+}
+
+/**
+ * Converts a color scheme into a string domain key.
+ */
+export function colorSchemeToDomainKey(scheme: ColorScheme): string {
+  return typeof scheme === 'string' ? scheme : `${ATTRIBUTE_OPTION_PREFIX}${scheme.attribute}`;
+}
+
+/**
+ * Converts a domain key back into a gradient color scheme.
+ */
+export function domainKeyToColorScheme(value: string): ColorScheme {
+  if (value.startsWith(ATTRIBUTE_OPTION_PREFIX)) {
+    // If extra attributes can be colored other than 'gradient', build machinery to handle that
+    return { type: 'gradient', attribute: value.slice(ATTRIBUTE_OPTION_PREFIX.length) };
+  }
+  return value as ColorScheme;
+}
+
+/**
+ * Lists the extra attribute names on a point cloud
+ * that can be used as a custom "color by" attribute.
+ *
+ * @param data - Point cloud data
+ * @returns Attribute names
+ */
+export function getAvailableAttributeNames(data: PointCloudData): string[] {
+  return data.extraAttributes ? Object.keys(data.extraAttributes) : [];
+}
+
+/**
+ * Checks whether a color scheme colors points along a continuous gradient
+ * (elevation, intensity or a custom attribute) and so uses the colormap,
+ * colorbar and color range controls.
+ *
+ * @param scheme - Color scheme to check
+ * @returns True for gradient schemes, false for classification and rgb
+ */
+export function isGradientColorScheme(scheme: ColorScheme): boolean {
+  return typeof scheme === 'string' ? scheme === 'elevation' || scheme === 'intensity' : true;
+}
+
+/**
+ * Formats an attribute name for display, splitting CamelCase and
+ * underscores into words
+ *
+ * @param name - Attribute name
+ * @returns Display label
+ */
+export function formatAttributeLabel(name: string): string {
+  return name
+    .replace(/_/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .trim();
 }
 
 /**

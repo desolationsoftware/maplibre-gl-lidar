@@ -3,6 +3,9 @@ export {
   getClassificationName,
   getAvailableClassifications,
   getAttributeValues,
+  getAvailableAttributeNames,
+  isGradientColorScheme,
+  formatAttributeLabel,
   CLASSIFICATION_COLORS,
 } from './ColorScheme';
 export type { ColorOptions } from './ColorScheme';
