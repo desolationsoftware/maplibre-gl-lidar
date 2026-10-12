@@ -256,6 +256,8 @@ interface LidarControlOptions {
 
   // Point cloud styling
   pointSize?: number; // Point size in pixels (default: 2)
+  pointSizeReferenceZoom?: number; // Scale point size with zoom; pointSize is the pixel size at this zoom (default: undefined, constant pixel size)
+  minPointSizeMeters?: number; // Minimum point size in meters when pointSizeReferenceZoom is set (default: 0)
   opacity?: number; // Opacity 0-1 (default: 1.0)
   colorScheme?: ColorScheme; // Color scheme (default: 'elevation')
   usePercentile?: boolean; // Use 2-98% percentile for coloring (default: true)

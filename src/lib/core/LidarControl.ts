@@ -43,7 +43,7 @@ import {
 /**
  * Default options for the LidarControl
  */
-const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode'> = {
+const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom'> = {
   collapsed: true,
   position: 'top-right',
   title: 'LiDAR Viewer',
@@ -52,6 +52,8 @@ const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'co
   theme: 'auto',
   className: '',
   pointSize: 2,
+  pointSizeReferenceZoom: undefined, // Constant pixel size by default
+  minPointSizeMeters: 0,
   opacity: 1.0,
   colorScheme: 'elevation',
   usePercentile: true,
@@ -227,6 +229,8 @@ export class LidarControl implements IControl {
     // Initialize point cloud manager
     this._pointCloudManager = new PointCloudManager(this._deckOverlay, {
       pointSize: this._state.pointSize,
+      pointSizeReferenceZoom: this._options.pointSizeReferenceZoom,
+      minPointSizeMeters: this._options.minPointSizeMeters,
       opacity: this._state.opacity,
       colorScheme: this._state.colorScheme,
       usePercentile: this._state.usePercentile,
@@ -1907,7 +1911,7 @@ export class LidarControl implements IControl {
   /**
    * Sets the point size.
    *
-   * @param size - Point size in pixels
+   * @param size - Point size in pixels (at `pointSizeReferenceZoom` when set)
    */
   setPointSize(size: number): void {
     this._state.pointSize = size;
@@ -2459,6 +2463,7 @@ export class LidarControl implements IControl {
       {
         sampleData: this._options.sampleData,
         sampleDataLabel: this._options.sampleDataLabel,
+        pointSizeReferenceZoom: this._options.pointSizeReferenceZoom,
       }
     );
 

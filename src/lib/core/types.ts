@@ -141,10 +141,26 @@ export interface LidarControlOptions {
   className?: string;
 
   /**
-   * Point size in pixels
+   * Point size in pixels. When `pointSizeReferenceZoom` is set, this is the
+   * size at that zoom level instead.
    * @default 2
    */
   pointSize?: number;
+
+  /**
+   * When set, points keep a constant real-world size instead of a constant
+   * screen size: `pointSize` is the pixel size at this zoom level, doubling
+   * with each zoom level above it and halving with each level below.
+   * @default undefined (constant pixel size)
+   */
+  pointSizeReferenceZoom?: number;
+
+  /**
+   * Minimum real-world point size in meters. Only applies when
+   * `pointSizeReferenceZoom` is set.
+   * @default 0
+   */
+  minPointSizeMeters?: number;
 
   /**
    * Point cloud opacity (0-1)

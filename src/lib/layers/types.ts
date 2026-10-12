@@ -38,9 +38,21 @@ export interface PickedPointInfo {
  */
 export interface PointCloudLayerOptions {
   /**
-   * Point size in pixels
+   * Point size in pixels, or pixels at `pointSizeReferenceZoom` when set
    */
   pointSize: number;
+
+  /**
+   * Zoom level at which `pointSize` is exact. When set, points are sized in
+   * meters so they scale with zoom; when undefined, they are a fixed pixel size.
+   */
+  pointSizeReferenceZoom?: number;
+
+  /**
+   * Minimum point size in meters when `pointSizeReferenceZoom` is set
+   * @default 0
+   */
+  minPointSizeMeters?: number;
 
   /**
    * Opacity (0-1)
