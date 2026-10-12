@@ -7,7 +7,7 @@ import { COLORMAPS } from './Colormaps';
 /**
  * Color for point clouds that lack the attribute a custom scheme colors by
  */
-const MISSING_ATTRIBUTE_COLOR: RGBColor = [128, 128, 128];
+const MISSING_ATTRIBUTE_COLOR: RGBColor = [ 128, 128, 128 ];
 
 /** Prefix for custom attribute schemes */
 const ATTRIBUTE_OPTION_PREFIX = 'attr:';

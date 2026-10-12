@@ -1,10 +1,10 @@
-import { Copc, Hierarchy, Getter, Las } from 'copc';
 import type { Copc as CopcType } from 'copc';
+import { Copc, Getter, Hierarchy, Las } from 'copc';
 import { createLazPerf, type LazPerf } from 'laz-perf';
 import { load } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import proj4 from 'proj4';
-import type { PointCloudData, ExtraPointAttributes, AttributeArray, PointNodeRange } from './types';
+import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
 
 /**
@@ -383,16 +383,19 @@ export class PointCloudLoader {
     let verticalUnitFactor = 1.0;
     let wkt: string | undefined;
 
-    // Try to get WKT from VLRs
+    // Try to get WKT and Extra Bytes definitions from VLRs.
     const getter = createBufferGetter(buffer);
+    let extraBytes: Las.ExtraBytes[] = [];
     try {
       const vlrs = await Las.Vlr.walk(getter, header);
-      for (const vlr of vlrs) {
-        if (vlr.userId === 'LASF_Projection' && vlr.recordId === 2112) {
-          const vlrData = await Las.Vlr.fetch(getter, vlr);
-          wkt = new TextDecoder().decode(vlrData).replace(/\0/g, '');
-          break;
-        }
+      const wktVlr = Las.Vlr.find(vlrs, 'LASF_Projection', 2112);
+      if (wktVlr) {
+        const vlrData = await Las.Vlr.fetch(getter, wktVlr);
+        wkt = new TextDecoder().decode(vlrData).replace(/\0/g, '');
+      }
+      const extraBytesVlr = Las.Vlr.find(vlrs, 'LASF_Spec', 4);
+      if (extraBytesVlr) {
+        extraBytes = Las.ExtraBytes.parse(await Las.Vlr.fetch(getter, extraBytesVlr));
       }
     } catch (e) {
       console.warn('Failed to read VLRs:', e);
@@ -413,8 +416,9 @@ export class PointCloudLoader {
     // Create view for reading point data
     const pointFormat = header.pointDataRecordFormat & 0x7F; // Mask off compression bit
 
-    // Create view - it needs header info and the point data buffer
-    const view = Las.View.create(pointData, header);
+    // Create view - it needs header info and the point data buffer, plus the
+    // Extra Bytes definitions
+    const view = Las.View.create(pointData, header, extraBytes);
 
     // Calculate bounds
     let bounds: PointCloudBounds;
@@ -477,6 +481,17 @@ export class PointCloudLoader {
     const greenGetter = hasColor ? view.getter('Green') : null;
     const blueGetter = hasColor ? view.getter('Blue') : null;
 
+    // Extra attributes
+    const extraAttributes: ExtraPointAttributes = {};
+    const extraGetters: Map<string, (index: number) => number> = new Map();
+    for (const dimName of Object.keys(view.dimensions || {})) {
+      if (!CORE_DIMENSIONS.has(dimName)) {
+        const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
+        extraAttributes[dimName] = createAttributeArray(config.arrayType, totalPoints);
+        extraGetters.set(dimName, view.getter(dimName));
+      }
+    }
+
     this._reportProgress(70, 'Processing point coordinates...');
     await this._yieldToUI();
 
@@ -507,6 +522,10 @@ export class PointCloudLoader {
         colors[i * 4 + 3] = 255;
       }
 
+      for (const [ dimName, extraGetter ] of extraGetters) {
+        extraAttributes[dimName][i] = extraGetter(i);
+      }
+
       // Yield periodically
       if (i % 100000 === 0 && i > 0) {
         const progress = 70 + (i / totalPoints) * 25;
@@ -522,6 +541,7 @@ export class PointCloudLoader {
       intensities,
       classifications,
       colors,
+      extraAttributes: Object.keys(extraAttributes).length > 0 ? extraAttributes : undefined,
       pointCount: totalPoints,
       bounds,
       hasRGB: hasColor,
