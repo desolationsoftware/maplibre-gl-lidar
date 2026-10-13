@@ -283,6 +283,12 @@ export interface LidarControlOptions {
   terrainExaggeration?: number;
 
   /**
+   * ID of an existing raster-dem source on the map to use for terrain.
+   * If not set, AWS Terrain Tiles are added and used.
+   */
+  terrainSourceId?: string;
+
+  /**
    * Point budget for streaming mode (maximum points in memory)
    * @default 5000000
    */
