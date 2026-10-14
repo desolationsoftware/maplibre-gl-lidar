@@ -1,22 +1,9 @@
 import { load } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import proj4 from 'proj4';
-import type {
-  NodeKey,
-  StreamingLoaderOptions,
-  ViewportInfo,
-  StreamingProgressEvent,
-  StreamingLoaderEvent,
-  StreamingLoaderEventHandler,
-} from './streaming-types';
-import type {
-  EptMetadata,
-  EptDimension,
-  EptHierarchy,
-  EptCachedNode,
-  ParsedDimension,
-} from './ept-types';
-import type { PointCloudData, ExtraPointAttributes, AttributeArray, PointNodeRange } from './types';
+import type { NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
+import type { EptCachedNode, EptDimension, EptHierarchy, EptMetadata, ParsedDimension } from './ept-types';
+import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
 
 /**
@@ -795,6 +782,90 @@ export class EptStreamingLoader {
 
     this._loadingQueue.push(node);
     this._loadingQueue.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
+  }
+
+  /**
+   * Evicts loaded nodes outside the current viewport and compacts point buffers.
+   * Hierarchy metadata is kept so evicted nodes can be loaded again later.
+   *
+   * @param viewport - Current viewport information
+   * @returns True if eviction completed, or false if active requests are still writing buffers
+   */
+  evictLoadedNodesOutsideViewport(viewport: ViewportInfo): boolean {
+    if (this._paused || this._activeRequests > 0 || this._isResetting) {
+      return false;
+    }
+
+    const loadedNodes = Array.from(this._nodeCache.values()).filter(
+      (node) => node.state === 'loaded' && node.bufferStartIndex !== undefined,
+    );
+    if (loadedNodes.length === 0) {
+      return true;
+    }
+
+    const keepNodes = loadedNodes
+      .filter((node) => this._boundsIntersectsViewport(node.boundsWgs84, viewport))
+      .sort((a, b) => a.bufferStartIndex! - b.bufferStartIndex!);
+    const keepNodeKeys = new Set(keepNodes.map((node) => node.key));
+
+    let nextStart = 0;
+    for (const node of keepNodes) {
+      const oldStart = node.bufferStartIndex!;
+      if (oldStart !== nextStart) {
+        this._copyNodeBufferRange(oldStart, nextStart, node.pointCount);
+      }
+      node.bufferStartIndex = nextStart;
+      nextStart += node.pointCount;
+    }
+
+    let evictedCount = 0;
+    for (const node of this._nodeCache.values()) {
+      if (node.state === 'loaded' && keepNodeKeys.has(node.key)) {
+        continue;
+      }
+      if (node.state !== 'loaded' && node.state !== 'error') {
+        continue;
+      }
+
+      node.state = 'pending';
+      node.bufferStartIndex = undefined;
+      node.error = undefined;
+      node.retryCount = undefined;
+      node.lastFailedAt = undefined;
+      node.priority = undefined;
+      evictedCount++;
+    }
+
+    const pointsChanged = nextStart !== this._totalLoadedPoints;
+    if (evictedCount > 0 || pointsChanged) {
+      this._totalLoadedPoints = nextStart;
+      this._totalLoadedNodes = keepNodes.length;
+      this._emit('progress', this._getProgressEvent());
+      this._scheduleLayerUpdate();
+    }
+
+    return true;
+  }
+
+  /**
+   * Copies a node's point data from one buffer range to another.
+   *
+   * @param fromStart - Source point index
+   * @param toStart - Destination point index
+   * @param pointCount - Number of points to copy
+   */
+  private _copyNodeBufferRange(fromStart: number, toStart: number, pointCount: number): void {
+    this._positions!.copyWithin(toStart * 3, fromStart * 3, (fromStart + pointCount) * 3);
+    this._intensities!.copyWithin(toStart, fromStart, fromStart + pointCount);
+    this._classifications!.copyWithin(toStart, fromStart, fromStart + pointCount);
+
+    if (this._colors) {
+      this._colors.copyWithin(toStart * 4, fromStart * 4, (fromStart + pointCount) * 4);
+    }
+
+    for (const arr of Object.values(this._extraAttributes)) {
+      arr.copyWithin(toStart, fromStart, fromStart + pointCount);
+    }
   }
 
   /**
