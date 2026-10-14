@@ -116,7 +116,7 @@ export class LidarControl implements IControl {
   private _mapContainer?: HTMLElement;
   private _container?: HTMLElement;
   private _panel?: HTMLElement;
-  private _options: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'terrainSourceId'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'terrainSourceId'>;
+  private _options: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom' | 'terrainSourceId'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom' | 'terrainSourceId'>;
   private _state: LidarState;
   private _eventHandlers: EventHandlersMap = new globalThis.Map();
 
