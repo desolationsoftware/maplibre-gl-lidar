@@ -74,6 +74,7 @@ function createState(overrides: Partial<LidarState> = {}): LidarState {
     zOffset: -12,
     hiddenClassifications: new Set([7, 2]),
     availableClassifications: new Set([1, 2, 7]),
+    availableAttributes: new Set(),
     terrainEnabled: true,
     ...overrides,
   };
