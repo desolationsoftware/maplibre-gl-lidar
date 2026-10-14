@@ -219,6 +219,7 @@ export class EptStreamingLoader {
   private _transformer: ((coord: [number, number]) => [number, number]) | null = null;
   private _verticalUnitFactor: number = 1.0;
   private _needsTransform: boolean = false;
+  private _spacingInMeters: number = 0;
 
   // Point format info
   private _hasColor: boolean = false;
@@ -360,11 +361,31 @@ export class EptStreamingLoader {
     const cubeSize = this._metadata.bounds[3] - this._metadata.bounds[0];
     const spacing = cubeSize / this._metadata.span;
 
+
+    // Convert spacing to meters. When the source CRS is geographic (lng/lat
+    // in degrees), info.spacing is in degrees and must be converted before it
+    // can be compared to screen ground resolution in meters. We detect a
+    // geographic source as one where no projection transformation was set up
+    // and the header bounds fall within valid lng/lat ranges.
+    const isGeographic =
+      !this._needsTransform &&
+      Math.abs(minX) <= 180 &&
+      Math.abs(maxX) <= 180 &&
+      Math.abs(minY) <= 90 &&
+      Math.abs(maxY) <= 90;
+    if (isGeographic) {
+      const centerLat = (this._bounds.minY + this._bounds.maxY) / 2;
+      const metersPerDegreeLng = 111320 * Math.cos((centerLat * Math.PI) / 180);
+      this._spacingInMeters = spacing * Math.max(metersPerDegreeLng, 1);
+    } else {
+      this._spacingInMeters = spacing;
+    }
+
     return {
       bounds: this._bounds,
       totalPoints: this._totalPointsInFile,
       hasRGB: this._hasColor,
-      spacing,
+      spacing: this._spacingInMeters,
     };
   }
 
@@ -457,12 +478,11 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Gets the octree spacing value.
+   * Gets the octree spacing value in meters (useful for ViewportManager).
+   * Always returned in meters even when the source CRS is geographic.
    */
   getSpacing(): number {
-    if (!this._metadata) return 1;
-    const cubeSize = this._metadata.bounds[3] - this._metadata.bounds[0];
-    return cubeSize / this._metadata.span;
+    return this._spacingInMeters;
   }
 
   /**
