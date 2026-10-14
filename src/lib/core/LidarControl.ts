@@ -60,6 +60,7 @@ const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'co
   showColorbar: true,
   pointBudget: 1000000,
   elevationRange: null,
+  filterRange: null,
   pickable: false,
   autoZoom: true,
   pickInfoFields: undefined, // Show all fields by default
@@ -191,6 +192,7 @@ export class LidarControl implements IControl {
       showColorbar: this._options.showColorbar ?? true,
       usePercentile: this._options.usePercentile,
       elevationRange: this._options.elevationRange,
+      filterRange: this._options.filterRange,
       pointBudget: this._options.pointBudget,
       pickable: this._options.pickable,
       loading: false,
@@ -231,6 +233,7 @@ export class LidarControl implements IControl {
       colorScheme: this._state.colorScheme,
       usePercentile: this._state.usePercentile,
       elevationRange: this._state.elevationRange,
+      filterRange: this._state.filterRange,
       pickable: this._state.pickable,
       zOffset: this._state.zOffset,
       classificationStyles: this._state.classificationStyles,
@@ -388,6 +391,12 @@ export class LidarControl implements IControl {
       );
     } else {
       this.clearElevationRange();
+    }
+
+    if (visualization.filterRange) {
+      this.setFilterRange(visualization.filterRange[0], visualization.filterRange[1]);
+    } else {
+      this.clearFilterRange();
     }
 
     this.setPickable(visualization.pickable);
@@ -1933,8 +1942,8 @@ export class LidarControl implements IControl {
   /**
    * Sets the color scheme.
    * Automatically switches colormap when changing to or from intensity, and resets
-   * the color range when changing between gradient domains (elevation, intensity,
-   * or a custom attribute).
+   * the color range and range filter when changing between gradient domains
+   * (elevation, intensity, or a custom attribute).
    *
    * @param scheme - Color scheme to apply
    */
@@ -1943,7 +1952,7 @@ export class LidarControl implements IControl {
     this._state.colorScheme = scheme;
     this._pointCloudManager?.setColorScheme(scheme);
 
-    // Auto-switch colormap and reset color range when changing between domains
+    // Auto-switch colormap and reset color range and range filter when changing between domains
     const domainChanged =
       isGradientColorScheme(scheme) &&
       isGradientColorScheme(previousScheme) &&
@@ -1956,6 +1965,12 @@ export class LidarControl implements IControl {
         percentileHigh: 98,
       };
       this._pointCloudManager?.setColorRange(this._state.colorRange);
+    }
+
+    // Elevation has no range filter (the elevation filter covers it)
+    if ((domainChanged || scheme === 'elevation') && this._state.filterRange !== null) {
+      this._state.filterRange = null;
+      this._pointCloudManager?.setFilterRange(null);
     }
 
     if (scheme === 'intensity' && previousScheme !== 'intensity') {
@@ -2062,6 +2077,30 @@ export class LidarControl implements IControl {
   clearElevationRange(): void {
     this._state.elevationRange = null;
     this._pointCloudManager?.setElevationRange(null);
+    this._emit('stylechange');
+    this._emit('statechange');
+  }
+
+  /**
+   * Sets the range filter, excluding points whose value for the current
+   * color scheme falls outside [min, max].
+   *
+   * @param min - Minimum value
+   * @param max - Maximum value
+   */
+  setFilterRange(min: number, max: number): void {
+    this._state.filterRange = [min, max];
+    this._pointCloudManager?.setFilterRange([min, max]);
+    this._emit('stylechange');
+    this._emit('statechange');
+  }
+
+  /**
+   * Clears the range filter.
+   */
+  clearFilterRange(): void {
+    this._state.filterRange = null;
+    this._pointCloudManager?.setFilterRange(null);
     this._emit('stylechange');
     this._emit('statechange');
   }
@@ -2467,6 +2506,13 @@ export class LidarControl implements IControl {
             this.setElevationRange(range[0], range[1]);
           } else {
             this.clearElevationRange();
+          }
+        },
+        onFilterRangeChange: (range) => {
+          if (range) {
+            this.setFilterRange(range[0], range[1]);
+          } else {
+            this.clearFilterRange();
           }
         },
         onPickableChange: (pickable) => this.setPickable(pickable),

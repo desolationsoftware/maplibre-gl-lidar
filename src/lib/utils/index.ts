@@ -1,6 +1,7 @@
 export {
   clamp,
   formatNumericValue,
+  getAdaptiveRangeStep,
   generateId,
   debounce,
   throttle,

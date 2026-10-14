@@ -76,6 +76,12 @@ export interface PointCloudLayerOptions {
   elevationRange: [number, number] | null;
 
   /**
+   * Range filter [min, max] or null for no filter. Excludes points whose
+   * value for the current `colorScheme` falls outside this range.
+   */
+  filterRange?: [number, number] | null;
+
+  /**
    * Whether points are pickable (enables hover/click interactions)
    * @default false
    */

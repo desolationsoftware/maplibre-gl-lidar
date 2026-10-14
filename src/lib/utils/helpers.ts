@@ -24,6 +24,25 @@ export function formatNumericValue(value: number, step: number): string {
 }
 
 /**
+ * Picks a slider step size scaled to a value range, so small domains get
+ * fine-grained steps and large domains don't need hundreds of steps.
+ *
+ * @param bounds - The domain the slider covers
+ * @returns A step size appropriate for that domain
+ */
+export function getAdaptiveRangeStep(bounds: { min: number; max: number }): number {
+  const range = bounds.max - bounds.min;
+  if (range <= 1) {
+    return 0.01;
+  } else if (range <= 10) {
+    return 0.1;
+  } else if (range <= 1000) {
+    return 1;
+  }
+  return Math.round(range / 100);
+}
+
+/**
  * Generates a unique ID string.
  *
  * @param prefix - Optional prefix for the ID

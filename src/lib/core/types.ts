@@ -205,6 +205,14 @@ export interface LidarControlOptions {
   elevationRange?: [number, number] | null;
 
   /**
+   * Range filter [min, max] or null for no filter. Excludes points whose
+   * value for the current `colorScheme` falls outside this range. Resets to
+   * `null` whenever the color scheme's domain changes or it switches to elevation.
+   * @default null
+   */
+  filterRange?: [number, number] | null;
+
+  /**
    * Whether points are pickable (enables hover/click interactions)
    * @default false
    */
@@ -349,6 +357,8 @@ export interface LidarState {
   /** Whether to use percentile range (2-98%) for elevation/intensity coloring */
   usePercentile: boolean;
   elevationRange: [number, number] | null;
+  /** Range filter for the current color scheme, [min, max] or null for no filter */
+  filterRange: [number, number] | null;
   pointBudget: number;
   pickable: boolean;
   loading: boolean;

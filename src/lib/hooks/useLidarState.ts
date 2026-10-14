@@ -22,6 +22,7 @@ const DEFAULT_STATE: LidarState = {
   showColorbar: true,
   usePercentile: true,
   elevationRange: null,
+  filterRange: null,
   pointBudget: 1000000,
   pickable: false,
   loading: false,
@@ -123,6 +124,13 @@ export function useLidarState(initialState?: Partial<LidarState>) {
   }, []);
 
   /**
+   * Sets the range filter
+   */
+  const setFilterRange = useCallback((filterRange: [number, number] | null) => {
+    setState((prev) => ({ ...prev, filterRange }));
+  }, []);
+
+  /**
    * Sets the point budget
    */
   const setPointBudget = useCallback((pointBudget: number) => {
@@ -174,6 +182,7 @@ export function useLidarState(initialState?: Partial<LidarState>) {
     setColorScheme,
     setUsePercentile,
     setElevationRange,
+    setFilterRange,
     setPointBudget,
     setZOffsetEnabled,
     setZOffset,

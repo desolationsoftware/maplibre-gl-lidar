@@ -3,6 +3,8 @@ export {
   getClassificationName,
   getAvailableClassifications,
   getAttributeValues,
+  getElevationValues,
+  getSchemeFilterValues,
   isGradientColorScheme,
   formatAttributeLabel,
   CLASSIFICATION_COLORS,

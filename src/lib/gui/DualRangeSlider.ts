@@ -1,3 +1,5 @@
+import { formatNumericValue } from '../utils/helpers';
+
 /**
  * Options for creating a dual-handle range slider
  */
@@ -282,7 +284,7 @@ export class DualRangeSlider {
    * Formats the range for display.
    */
   private _formatRange(low: number, high: number): string {
-    const format = this._options.formatValue || ((v: number) => v.toFixed(1));
+    const format = this._options.formatValue || ((v: number) => formatNumericValue(v, this._options.step));
     return `${format(low)} - ${format(high)}`;
   }
 }
