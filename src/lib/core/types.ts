@@ -25,8 +25,9 @@ export interface PointCloudLoadOptions {
    */
   allowFullDownloadFallback?: boolean;
   /**
-   * Marks the dataset as machine-managed, so the panel summarizes it rather than listing
-   * it as something the user loaded.
+   * Marks the dataset as machine-managed, such as one tile of a larger whole. The panel
+   * summarizes it rather than listing it, and its load leaves the control's loading,
+   * error and active dataset state alone. It is also excluded from share URLs.
    * @default false
    */
   internal?: boolean;
@@ -112,7 +113,7 @@ export interface PointCloudInfo {
   wkt?: string;
   /**
    * True for machine-managed datasets, such as tiles, rather than ones chosen by the
-   * user. The panel summarizes these as a single entry instead of listing each one.
+   * user. See {@link PointCloudLoadOptions.internal}.
    */
   internal?: boolean;
 }

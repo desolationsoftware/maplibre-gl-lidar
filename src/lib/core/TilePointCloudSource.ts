@@ -18,7 +18,7 @@ export interface TilePointCloudHost {
 export interface TilePointCloudSourceOptions {
   /**
    * URL template for a tile, with `{z}`, `{x}` and `{y}` placeholders (XYZ scheme).
-   * Relative URLs resolve against the page origin.
+   * Relative URLs resolve against the page URL.
    *
    * The format is inferred from the URL the same way as for a single load: a URL ending
    * in `ept.json` streams as EPT, a `.copc.` file streams as COPC, and anything else
@@ -120,11 +120,10 @@ export class TilePointCloudSource {
     this._host = host;
     this._options = { ...DEFAULTS, ...options };
     if (!this._options.url) {
-      throw new Error('TilePointCloudSource requires a tileUrl');
+      throw new Error('TilePointCloudSource requires a url');
     }
-
-    if(!this._options.tileZoom) {
-      throw new Error('TilePointCloudSource requires a tileZoom')
+    if (!Number.isInteger(this._options.tileZoom) || this._options.tileZoom < 0) {
+      throw new Error(`TilePointCloudSource tileZoom must be a non-negative integer, got ${this._options.tileZoom}`);
     }
   }
 
@@ -395,11 +394,8 @@ export class TilePointCloudSource {
 }
 
 /**
- * Resolves an origin-relative path against the current origin.
+ * Resolves a possibly relative URL against the page URL.
  */
-function toAbsoluteUrl(path: string): string {
-  if (path.startsWith('http://') || path.startsWith('https://')) {
-    return path;
-  }
-  return `${window.location.origin}${path.startsWith('/') ? '' : '/'}${path}`;
+function toAbsoluteUrl(url: string): string {
+  return new URL(url, window.location.href).href;
 }

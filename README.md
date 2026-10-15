@@ -295,8 +295,9 @@ interface LidarControlOptions {
 // Loading
 loadPointCloud(source: string | File | ArrayBuffer, options?: PointCloudLoadOptions): Promise<PointCloudInfo>
 loadPointCloudStreaming(source: string | File | ArrayBuffer, options?: StreamingLoaderOptions): Promise<PointCloudInfo>
-stopStreaming(): void  // Stop dynamic loading and clean up
-unloadPointCloud(id?: string): void
+stopStreaming(): void  // Stop dynamic loading, including tile mode, and clean up
+unloadPointCloud(id?: string): void  // With no id, unloads everything and turns tile mode off
+setTileMode(enabled: boolean): void  // Load tiles from tileSource.url as the map moves
 getPointClouds(): PointCloudInfo[]
 flyToPointCloud(id?: string): void
 getShareUrl(): string
@@ -626,7 +627,6 @@ const lidarControl = new LidarControl({
 
 // Toggle at runtime, or with the panel's "Follow map" checkbox
 lidarControl.setTileMode(false);
-lidarControl.setTileSourceOptions({ url: "https://example.com/tiles/{z}-{x}-{y}/ept.json" });
 ```
 
 Tiles are probed before loading, and a tile that returns 404 is never requested again, so sparse coverage is fine. The server should support HTTP Range requests for COPC and LAS/LAZ tiles.

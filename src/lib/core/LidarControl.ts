@@ -160,8 +160,6 @@ export class LidarControl implements IControl {
   // Tile-driven loading.
   private _tileSource?: TilePointCloudSource;
   private _tileViewportManager?: ViewportManager;
-  // Datasets the tile source owns, which skip the whole-viewport coverage reset.
-  private _tileDatasetIds: Set<string> = new Set();
 
   // Track whether the user has explicitly set zOffset (to skip autoZOffset)
   private _manualZOffset = false;
@@ -799,12 +797,14 @@ export class LidarControl implements IControl {
     }
 
     // Update state
-    this.setState({ loading: true, error: null });
+    if (!options?.internal) {
+      this.setState({ loading: true, error: null });
+    }
     this._emit('loadstart');
 
     // Progress callback to update the UI
     const onProgress = (progress: number, message: string) => {
-      this._panelBuilder?.updateLoadingProgress(progress, message);
+      this._reportLoadProgress(options?.internal, progress, message);
     };
 
     try {
@@ -871,9 +871,8 @@ export class LidarControl implements IControl {
       // Update state (include z-offset values to trigger panel update)
       const pointClouds = [...this._state.pointClouds, info];
       this.setState({
-        loading: false,
+        ...(options?.internal ? {} : { loading: false, activePointCloudId: id }),
         pointClouds,
-        activePointCloudId: id,
         availableClassifications: mergedClassifications,
         zOffsetBase,
         zOffset: zOffset ?? this._state.zOffset,
@@ -918,10 +917,12 @@ export class LidarControl implements IControl {
         return this._loadPointCloudFullDownload(source);
       }
 
-      this.setState({
-        loading: false,
-        error: `Failed to load: ${error.message}`,
-      });
+      if (!options?.internal) {
+        this.setState({
+          loading: false,
+          error: `Failed to load: ${error.message}`,
+        });
+      }
       this._emitWithData('loaderror', { error });
       throw error;
     }
@@ -941,7 +942,6 @@ export class LidarControl implements IControl {
       }
 
       this._pointCloudManager?.removePointCloud(id);
-      this._tileDatasetIds.delete(id);
       const pointClouds = this._state.pointClouds.filter((pc) => pc.id !== id);
 
       // Reset classification state when removing datasets
@@ -1004,7 +1004,7 @@ export class LidarControl implements IControl {
       name = `PointCloud ${id}`;
     }
 
-    this.setState({ loading: true, error: null, streamingActive: true });
+    this.setState(options?.internal ? { streamingActive: true } : { loading: true, error: null, streamingActive: true });
     this._emit('loadstart');
     this._emit('streamingstart');
 
@@ -1021,11 +1021,11 @@ export class LidarControl implements IControl {
       });
 
       // Initialize - reads header and root hierarchy
-      this._panelBuilder?.updateLoadingProgress(10, 'Initializing COPC file...');
+      this._reportLoadProgress(options?.internal, 10, 'Initializing COPC file...');
       const { bounds, totalPoints, hasRGB, spacing } =
         await streamingLoader.initialize();
 
-      this._panelBuilder?.updateLoadingProgress(20, 'Setting up streaming...');
+      this._reportLoadProgress(options?.internal, 20, 'Setting up streaming...');
 
       // Track if auto Z offset has been applied for this streaming dataset
       let autoZOffsetApplied = false;
@@ -1086,7 +1086,8 @@ export class LidarControl implements IControl {
           99,
           20 + Math.round((progress.loadedPoints / progress.pointBudget) * 70)
         );
-        this._panelBuilder?.updateLoadingProgress(
+        this._reportLoadProgress(
+          options?.internal,
           percent,
           `Streaming: ${progress.loadedPoints.toLocaleString()} points loaded`
         );
@@ -1134,9 +1135,8 @@ export class LidarControl implements IControl {
       // Update state
       const pointClouds = [...this._state.pointClouds, info];
       this.setState({
-        loading: false,
+        ...(options?.internal ? {} : { loading: false, activePointCloudId: id }),
         pointClouds,
-        activePointCloudId: id,
       });
 
       // Update computed color bounds for colorbar display
@@ -1219,17 +1219,18 @@ export class LidarControl implements IControl {
         return this._loadPointCloudFullDownload(source);
       }
 
-      this.setState({
-        loading: false,
-        streamingActive: false,
-        error: `Failed to load: ${error.message}`,
-      });
       const streamingLoader = this._streamingLoaders.get(id);
       if (streamingLoader) {
         streamingLoader.destroy();
         this._streamingLoaders.delete(id);
       }
       this._copcViewportRequestIds.delete(id);
+
+      const hasActiveStreaming = this._streamingLoaders.size > 0 || this._eptStreamingLoaders.size > 0;
+      this.setState({
+        streamingActive: hasActiveStreaming,
+        ...(options?.internal ? {} : { loading: false, error: `Failed to load: ${error.message}` }),
+      });
       this._emitWithData('loaderror', { error });
       throw error;
     }
@@ -1250,7 +1251,7 @@ export class LidarControl implements IControl {
     const id = generateId('ept-stream');
     const name = options?.name ?? `${getFilename(eptUrl.replace('/ept.json', ''))} (EPT)`;
 
-    this.setState({ loading: true, error: null, streamingActive: true });
+    this.setState(options?.internal ? { streamingActive: true } : { loading: true, error: null, streamingActive: true });
     this._emit('loadstart');
     this._emit('streamingstart');
 
@@ -1267,10 +1268,10 @@ export class LidarControl implements IControl {
       });
 
       // Initialize - reads ept.json metadata
-      this._panelBuilder?.updateLoadingProgress(10, 'Initializing EPT dataset...');
+      this._reportLoadProgress(options?.internal, 10, 'Initializing EPT dataset...');
       const { bounds, totalPoints, hasRGB, spacing } = await eptLoader.initialize();
 
-      this._panelBuilder?.updateLoadingProgress(20, 'Setting up streaming...');
+      this._reportLoadProgress(options?.internal, 20, 'Setting up streaming...');
 
       // Track if auto Z offset has been applied
       let autoZOffsetApplied = false;
@@ -1326,7 +1327,8 @@ export class LidarControl implements IControl {
           99,
           20 + Math.round((progress.loadedPoints / progress.pointBudget) * 70)
         );
-        this._panelBuilder?.updateLoadingProgress(
+        this._reportLoadProgress(
+          options?.internal,
           percent,
           `Streaming EPT: ${progress.loadedPoints.toLocaleString()} points loaded`
         );
@@ -1376,9 +1378,8 @@ export class LidarControl implements IControl {
       // Update state
       const pointClouds = [...this._state.pointClouds, info];
       this.setState({
-        loading: false,
+        ...(options?.internal ? {} : { loading: false, activePointCloudId: id }),
         pointClouds,
-        activePointCloudId: id,
       });
 
       // Update computed color bounds for colorbar display
@@ -1434,9 +1435,8 @@ export class LidarControl implements IControl {
       const hasActiveStreaming = this._streamingLoaders.size > 0 || this._eptStreamingLoaders.size > 0;
 
       this.setState({
-        loading: false,
         streamingActive: hasActiveStreaming,
-        error: `Failed to load EPT: ${error.message}`,
+        ...(options?.internal ? {} : { loading: false, error: `Failed to load EPT: ${error.message}` }),
       });
       this._emitWithData('loaderror', { error });
       throw error;
@@ -1478,9 +1478,9 @@ export class LidarControl implements IControl {
       const minDepthForCoverage = Math.max(0, viewport.targetDepth - 2);
 
       // Check coverage ratio - if less than 50% is covered, we need to load more.
-      // Skipped when in tile mode.
+      // Skipped for internal datasets, which only cover part of the viewport.
       const coverageRatio = eptLoader.getViewportCoverageRatio(viewport, minDepthForCoverage);
-      const needsCoverage = !this._tileDatasetIds.has(datasetId) && coverageRatio < 0.5;
+      const needsCoverage = !this._isInternalDataset(datasetId) && coverageRatio < 0.5;
 
       const hasPendingSubtrees = eptLoader.hasPendingSubtrees(viewport);
       const hasPendingWork = nodesToLoad.length > 0 || hasPendingSubtrees;
@@ -1758,13 +1758,28 @@ export class LidarControl implements IControl {
           allowFullDownloadFallback: false,
           internal: true,
         });
-        this._tileDatasetIds.add(info.id);
         return info.id;
       },
       unloadTile: (datasetId) => {
         this.unloadPointCloud(datasetId);
       },
     };
+  }
+
+  /**
+   * Whether a dataset was loaded as internal, i.e. managed by the control rather than the user.
+   */
+  private _isInternalDataset(id: string): boolean {
+    return this._state.pointClouds.some((pc) => pc.id === id && pc.internal);
+  }
+
+  /**
+   * Reports load progress in the panel. Internal loads don't drive the panel's progress bar.
+   */
+  private _reportLoadProgress(internal: boolean | undefined, progress: number, message: string): void {
+    if (!internal) {
+      this._panelBuilder?.updateLoadingProgress(progress, message);
+    }
   }
 
   /**
@@ -1810,8 +1825,8 @@ export class LidarControl implements IControl {
       const budgetReached = loadedPoints >= pointBudget * 0.8;
       const minDepthForCoverage = Math.max(0, viewport.targetDepth - 2);
       const coverageRatio = streamingLoader.getViewportCoverageRatio(viewport, minDepthForCoverage);
-      // Skipped for tiles: one tile can't fill the viewport, so the reset would discard it every pass.
-      const needsCoverage = !this._tileDatasetIds.has(datasetId) && coverageRatio < 0.5;
+      // Skipped for internal datasets, which only cover part of the viewport.
+      const needsCoverage = !this._isInternalDataset(datasetId) && coverageRatio < 0.5;
       const hasPendingWork = nodesToLoad.length > 0;
 
       // A pinned region is kept loaded; never reset it away for coverage.
@@ -1867,7 +1882,6 @@ export class LidarControl implements IControl {
         eptLoader.destroy();
         this._eptStreamingLoaders.delete(id);
       }
-      this._tileDatasetIds.delete(id);
 
       // Remove point cloud from manager
       this._pointCloudManager?.removePointCloud(id);
@@ -1892,6 +1906,9 @@ export class LidarControl implements IControl {
       this._emit('streamingstop');
       this._emitWithData('unload', { pointCloud: { id } });
     } else {
+      // Tile mode would otherwise keep tracking the tiles torn down below.
+      this.setTileMode(false);
+
       // Stop all streaming datasets (COPC and EPT)
       const streamingIds = [
         ...Array.from(this._streamingLoaders.keys()),
@@ -1910,7 +1927,6 @@ export class LidarControl implements IControl {
       }
       this._streamingLoaders.clear();
       this._copcViewportRequestIds.clear();
-      this._tileDatasetIds.clear();
 
       // Destroy all EPT streaming loaders
       for (const eptLoader of this._eptStreamingLoaders.values()) {
