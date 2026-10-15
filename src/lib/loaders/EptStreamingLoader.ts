@@ -5,7 +5,7 @@ import type { NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, Stream
 import type { EptCachedNode, EptDimension, EptHierarchy, EptMetadata, ParsedDimension } from './ept-types';
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
-import { compareNodePriority, nodeLoadPriority } from '../utils/helpers';
+import { compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
 
 /**
  * Configuration for attribute storage types
@@ -568,11 +568,11 @@ export class EptStreamingLoader {
   ): boolean {
     const [west, south, east, north] = viewport.bounds;
 
-    // Add 20% buffer around viewport
+    // Add a buffer around viewport
     const width = east - west;
     const height = north - south;
-    const bufferX = width * 0.2;
-    const bufferY = height * 0.2;
+    const bufferX = width * VIEWPORT_BUFFER_FACTOR;
+    const bufferY = height * VIEWPORT_BUFFER_FACTOR;
 
     const bufferedWest = west - bufferX;
     const bufferedEast = east + bufferX;

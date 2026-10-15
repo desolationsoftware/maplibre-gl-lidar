@@ -1,6 +1,6 @@
 import type { ViewportInfo } from '../loaders/streaming-types';
-import { enumerateTileRange, extendBoundsOutwardByFactor, getTileRangeForBounds, type LngLatBounds, rangeContainsTileInclusive, tileDistanceFrom, type TileId, type TileRange } from '../utils/tileMath';
-import { isEptUrl } from '../utils/helpers';
+import { enumerateTileRange, extendBoundsOutwardByFactor, getTileRangeForBounds, rangeContainsTileInclusive, tileDistanceFrom, type TileId, type TileRange } from '../utils/tileMath';
+import { isEptUrl, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
 
 /**
  * The slice of `LidarControl` the tile source needs.
@@ -51,17 +51,6 @@ export interface TilePointCloudSourceOptions {
    * @default 8
    */
   maxResidentTiles?: number;
-  /**
-   * Viewport padding for the ring in which tiles load, as a fraction of viewport size.
-   * 0.5 adds half the full width to each side, so tiles one screen out are already warm.
-   * @default 0
-   */
-  loadRingFactor?: number;
-  /**
-   * Padding for the ring outside which tiles unload.
-   * @default 0
-   */
-  evictRingFactor?: number;
   /** Upper bound on remembered absent tiles, so a long session cannot grow unboundedly. */
   maxNegativeCacheEntries?: number;
   /** Base delay before retrying a tile that failed for a reason other than "absent". */
@@ -87,8 +76,6 @@ const DEFAULTS = {
   tileZoom: 14,
   minZoom: 16,
   maxResidentTiles: 8,
-  loadRingFactor: 0,
-  evictRingFactor: 0,
   maxNegativeCacheEntries: 4096,
   retryBackoffMs: 5000,
 };
@@ -136,8 +123,8 @@ export class TilePointCloudSource {
   }
 
   /**
-   * Runs one pass: unload what has left the evict ring, trim to the resident cap, and
-   * start loads for newly visible tiles.
+   * Runs one pass: unload tiles that have left the buffered viewport, trim to the resident
+   * cap, and start loads for newly visible tiles.
    */
   update(viewport: ViewportInfo): void {
     if (this._destroyed) {
@@ -151,13 +138,15 @@ export class TilePointCloudSource {
     }
 
     console.log('UPDATE PASS');
-    const bounds = viewport.bounds;
-    const loadRanges = this._rangesFor(bounds, this._options.loadRingFactor);
-    const evictRanges = this._rangesFor(bounds, this._options.evictRingFactor);
+    // Same buffer the loaders keep nodes within, so a tile isn't dropped while its nodes are still wanted.
+    const range = getTileRangeForBounds(
+      extendBoundsOutwardByFactor(viewport.bounds, VIEWPORT_BUFFER_FACTOR),
+      this._options.tileZoom,
+    );
 
-    this._evictOutsideRanges(evictRanges);
+    this._evictOutsideRange(range);
     this._enforceResidentCap(viewport.center);
-    this._startLoads(loadRanges, viewport);
+    this._startLoads(range, viewport);
   }
 
   /** Drops every tile, keeping the negative cache so absent tiles are not re-probed. */
@@ -174,13 +163,9 @@ export class TilePointCloudSource {
     this._errors.clear();
   }
 
-  private _rangesFor(bounds: LngLatBounds, factor: number): TileRange {
-    return getTileRangeForBounds(factor > 0 ? extendBoundsOutwardByFactor(bounds, factor) : bounds, this._options.tileZoom);
-  }
-
-  private _evictOutsideRanges(evictRanges: TileRange): void {
+  private _evictOutsideRange(range: TileRange): void {
     for (const entry of Array.from(this._tiles.values())) {
-      if (!rangeContainsTileInclusive(evictRanges, entry.tile)) {
+      if (!rangeContainsTileInclusive(range, entry.tile)) {
         this._unload(entry);
       }
     }
@@ -216,7 +201,7 @@ export class TilePointCloudSource {
   }
 
   /**
-   * Probes every tile in the ring that has not been asked about yet to determine
+   * Probes every tile in the range that has not been asked about yet to determine
    * if each tile exists.
    */
   private _startLoads(loadRange: TileRange, viewport: ViewportInfo): void {
@@ -315,7 +300,7 @@ export class TilePointCloudSource {
       const datasetId = await this._host.loadTile(url, entry.tile.key);
 
       if (this._isStale(entry)) {
-        // The tile left the ring while its header was loading; drop what we just built.
+        // The tile left the range while its header was loading; drop what we just built.
         this._host.unloadTile(datasetId);
         return;
       }

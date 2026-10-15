@@ -1882,6 +1882,7 @@ export class LidarControl implements IControl {
         eptLoader.destroy();
         this._eptStreamingLoaders.delete(id);
       }
+      this._eptViewportRequestIds.delete(id);
 
       // Remove point cloud from manager
       this._pointCloudManager?.removePointCloud(id);

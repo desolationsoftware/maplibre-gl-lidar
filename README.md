@@ -612,7 +612,7 @@ lidarControl.loadPointCloudEptStreaming(
 
 ### Tile Mode
 
-For data published as a pyramid of point cloud tiles, tile mode loads the tiles covering the view as the map moves and unloads them as they leave it. Each tile loads the same way a single URL does: `ept.json` URLs stream as EPT, `.copc.` files stream as COPC, and other LAS/LAZ files are downloaded whole.
+For data published as a pyramid of point cloud tiles, tile mode loads the tiles covering the view, plus a small margin, as the map moves and unloads them as they leave it. Each tile loads the same way a single URL does: `ept.json` URLs stream as EPT, `.copc.` files stream as COPC, and other LAS/LAZ files are downloaded whole.
 
 ```typescript
 const lidarControl = new LidarControl({
