@@ -5,6 +5,7 @@ import type { NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, Stream
 import type { EptCachedNode, EptDimension, EptHierarchy, EptMetadata, ParsedDimension } from './ept-types';
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
+import { compareNodePriority, nodeLoadPriority } from '../utils/helpers';
 
 /**
  * Configuration for attribute storage types
@@ -175,7 +176,7 @@ const DEFAULT_OPTIONS: Required<StreamingLoaderOptions> = {
 
 /**
  * Streams Entwine Point Tile (EPT) data on-demand based on viewport.
- * Implements center-first priority loading and respects point budget.
+ * Loads coarse-to-fine, center-first within each depth, and respects point budget.
  *
  * EPT format uses:
  * - ept.json for metadata
@@ -779,14 +780,15 @@ export class EptStreamingLoader {
 
       // Add to load list if not already loaded/loading
       if (node.state !== 'loaded' && node.state !== 'loading') {
+        // Coarse-to-fine, then nearest-first within a depth
         const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-        node.priority = distPriority - (depth * 0.0001);
+        node.priority = nodeLoadPriority(depth, distPriority);
         nodesToLoad.push(node);
       }
     }
 
-    // Sort by priority (center-first)
-    nodesToLoad.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
+    // Sort by priority (coarse-to-fine, then center-first)
+    nodesToLoad.sort(compareNodePriority);
 
     return nodesToLoad;
   }
@@ -801,7 +803,7 @@ export class EptStreamingLoader {
     if (this._loadingQueue.find((n) => n.key === node.key)) return;
 
     this._loadingQueue.push(node);
-    this._loadingQueue.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
+    this._loadingQueue.sort(compareNodePriority);
   }
 
   /**
@@ -1543,10 +1545,10 @@ export class EptStreamingLoader {
     for (const node of this._loadingQueue) {
       const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
       const depth = node.keyArray[0];
-      node.priority = distPriority - (depth * 0.0001);
+      node.priority = nodeLoadPriority(depth, distPriority);
     }
 
-    this._loadingQueue.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
+    this._loadingQueue.sort(compareNodePriority);
   }
 
   /**
