@@ -1,11 +1,36 @@
 import type { ClassificationStyles } from '../colorizers/ColorScheme';
 import type { Map } from 'maplibre-gl';
 import type { PickedPointInfo } from '../layers/types';
+import type { TilePointCloudSourceOptions } from './TilePointCloudSource';
 
 /**
  * COPC loading mode options
  */
 export type CopcLoadingMode = 'full' | 'dynamic';
+
+/**
+ * Per-load options handled by the control rather than by a loader.
+ */
+export interface PointCloudLoadOptions {
+  /** Overrides the control's `copcLoadingMode` for this load. */
+  loadingMode?: CopcLoadingMode;
+  /** Display name, defaulting to one derived from the source. */
+  name?: string;
+  /** Overrides the control's `autoZoom` for this load. */
+  autoZoom?: boolean;
+  /**
+   * Whether a CORS-blocked load may fall back to downloading the whole file. Should be
+   * off when a failure is expected to mean the file is absent.
+   * @default true
+   */
+  allowFullDownloadFallback?: boolean;
+  /**
+   * Marks the dataset as machine-managed, so the panel summarizes it rather than listing
+   * it as something the user loaded.
+   * @default false
+   */
+  internal?: boolean;
+}
 
 /**
  * Available colormap names (matplotlib-style)
@@ -85,6 +110,11 @@ export interface PointCloudInfo {
   source: string;
   /** WKT string describing the coordinate reference system */
   wkt?: string;
+  /**
+   * True for machine-managed datasets, such as tiles, rather than ones chosen by the
+   * user. The panel summarizes these as a single entry instead of listing each one.
+   */
+  internal?: boolean;
 }
 
 /**
@@ -341,6 +371,17 @@ export interface LidarControlOptions {
    * @default true
    */
   closeOnOutsideClick?: boolean;
+
+  /**
+   * Whether to load point clouds automatically from a tile pyramid as the map moves.
+   * Requires `tileSource.url`. Independent of loading a file by hand.
+   * @default false
+   */
+  tileMode?: boolean;
+  /**
+   * The tile pyramid tile mode loads from. Setting `url` makes tile mode available.
+   */
+  tileSource?: TilePointCloudSourceOptions;
 }
 
 /**
@@ -410,6 +451,10 @@ export interface LidarState {
   classificationStyles?: ClassificationStyles;
   /** Whether 3D terrain is enabled */
   terrainEnabled: boolean;
+  /** Whether point cloud tiles are following the map. */
+  tileMode: boolean;
+  /** Whether a tile source URL is configured, so tile mode can be turned on. */
+  tileModeAvailable: boolean;
 }
 
 /**

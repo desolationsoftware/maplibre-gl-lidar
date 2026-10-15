@@ -282,6 +282,10 @@ interface LidarControlOptions {
   streamingPointBudget?: number; // Max points for streaming (default: 5000000)
   streamingMaxConcurrentRequests?: number; // Concurrent node requests (default: 4)
   streamingViewportDebounceMs?: number; // Viewport change debounce (default: 150)
+
+  // Tile mode (map-following tile pyramid)
+  tileMode?: boolean; // Start with tile mode on (default: false)
+  tileSource?: TilePointCloudSourceOptions; // Tile pyramid; tileSource.url enables tile mode
 }
 ```
 
@@ -289,7 +293,7 @@ interface LidarControlOptions {
 
 ```typescript
 // Loading
-loadPointCloud(source: string | File | ArrayBuffer, options?: { loadingMode?: 'full' | 'dynamic' }): Promise<PointCloudInfo>
+loadPointCloud(source: string | File | ArrayBuffer, options?: PointCloudLoadOptions): Promise<PointCloudInfo>
 loadPointCloudStreaming(source: string | File | ArrayBuffer, options?: StreamingLoaderOptions): Promise<PointCloudInfo>
 stopStreaming(): void  // Stop dynamic loading and clean up
 unloadPointCloud(id?: string): void
@@ -604,6 +608,28 @@ lidarControl.loadPointCloudEptStreaming(
 - Red Rocks: `https://na-c.entwine.io/red-rocks/ept.json`
 
 **Note:** EPT datasets require CORS support from the server. The sample datasets from entwine.io are CORS-enabled.
+
+### Tile Mode
+
+For data published as a pyramid of point cloud tiles, tile mode loads the tiles covering the view as the map moves and unloads them as they leave it. Each tile loads the same way a single URL does: `ept.json` URLs stream as EPT, `.copc.` files stream as COPC, and other LAS/LAZ files are downloaded whole.
+
+```typescript
+const lidarControl = new LidarControl({
+  tileMode: true,
+  tileSource: {
+    url: "https://example.com/tiles/{z}/{x}/{y}.copc.laz", // XYZ scheme
+    tileZoom: 14, // Zoom the tiles are published at
+    minZoom: 16, // Map zoom below which all tiles unload
+    maxResidentTiles: 8, // Tiles loaded at once; each gets streamingPointBudget
+  },
+});
+
+// Toggle at runtime, or with the panel's "Follow map" checkbox
+lidarControl.setTileMode(false);
+lidarControl.setTileSourceOptions({ url: "https://example.com/tiles/{z}-{x}-{y}/ept.json" });
+```
+
+Tiles are probed before loading, and a tile that returns 404 is never requested again, so sparse coverage is fine. The server should support HTTP Range requests for COPC and LAS/LAZ tiles.
 
 ### React Hooks
 
