@@ -35,6 +35,36 @@ export function generateId(prefix?: string): string {
 }
 
 /**
+ * Whether a URL points at an EPT dataset's `ept.json`.
+ */
+export function isEptUrl(url: string): boolean {
+  return url.endsWith('/ept.json') || url.includes('/ept.json?');
+}
+
+/**
+ * Load priority for an octree node. Lower values load first.
+ *
+ * Nodes load coarse-to-fine, nearest the viewport center first within a depth, so a
+ * spent budget leaves the whole viewport at lower density rather than a detailed center.
+ * Distances are in degrees and never reach the depth stride.
+ *
+ * @param depth - Octree depth of the node
+ * @param distanceFromCenter - Distance from the node's center to the viewport center
+ * @returns Priority value
+ */
+export function nodeLoadPriority(depth: number, distanceFromCenter: number): number {
+  return depth * 1000 + distanceFromCenter;
+}
+
+/**
+ * Sort comparator for nodes by `priority`, with unprioritized nodes last. Zero is a
+ * valid priority, so this must not use `||`.
+ */
+export function compareNodePriority(a: { priority?: number }, b: { priority?: number }): number {
+  return (a.priority ?? Infinity) - (b.priority ?? Infinity);
+}
+
+/**
  * Debounces a function call.
  *
  * @param fn - The function to debounce

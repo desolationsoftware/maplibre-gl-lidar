@@ -1384,7 +1384,6 @@ export class LidarControl implements IControl {
         this._eptStreamingLoaders.delete(id);
       }
       this._eptViewportRequestIds.delete(id);
-      this._eptLastViewport.delete(id);
       const viewportManager = this._viewportManagers.get(id);
       if (viewportManager) {
         viewportManager.destroy();
@@ -1403,43 +1402,6 @@ export class LidarControl implements IControl {
     }
   }
 
-  /**
-   * Handles viewport changes for EPT streaming mode.
-   *
-   * @param viewport - Current viewport information
-   * @param datasetId - ID of the EPT dataset
-   */
-  private _shouldResetEptForViewportChange(
-    previous: ViewportInfo | undefined,
-    current: ViewportInfo
-  ): boolean {
-    if (!previous) return false;
-
-    const [prevWest, prevSouth, prevEast, prevNorth] = previous.bounds;
-    const [curWest, curSouth, curEast, curNorth] = current.bounds;
-
-    const intersects = !(
-      curEast < prevWest ||
-      curWest > prevEast ||
-      curNorth < prevSouth ||
-      curSouth > prevNorth
-    );
-
-    // Reset if viewports don't intersect at all
-    if (!intersects) return true;
-
-    const prevWidth = prevEast - prevWest;
-    const prevHeight = prevNorth - prevSouth;
-    const dx = current.center[0] - previous.center[0];
-    const dy = current.center[1] - previous.center[1];
-    const centerDistance = Math.sqrt(dx * dx + dy * dy);
-
-    // Reset if center moved more than 30% of viewport dimension
-    const threshold = Math.max(prevWidth, prevHeight) * 0.3;
-
-    return centerDistance > threshold;
-  }
-
   private async _handleViewportChangeForEptStreaming(
     viewport: ViewportInfo,
     datasetId: string,
@@ -1456,20 +1418,14 @@ export class LidarControl implements IControl {
 
       if (this._eptViewportRequestIds.get(datasetId) !== currentRequestId) return;
 
-      const previousViewport = this._eptLastViewport.get(datasetId);
-      const shouldResetForMove = this._shouldResetEptForViewportChange(previousViewport, viewport);
-      this._eptLastViewport.set(datasetId, viewport);
-
       eptLoader.pruneQueueForViewport(viewport);
 
-      if (shouldResetForMove) {
-        const resetSucceeded = eptLoader.resetLoadedData();
-        if (!resetSucceeded) {
-          setTimeout(() => {
-            this._handleViewportChangeForEptStreaming(viewport, datasetId, currentRequestId);
-          }, 200);
-          return;
-        }
+      const evictSucceeded = eptLoader.evictLoadedNodesOutsideViewport(viewport);
+      if (!evictSucceeded) {
+        setTimeout(() => {
+          this._handleViewportChangeForEptStreaming(viewport, datasetId, currentRequestId);
+        }, 200);
+        return;
       }
 
       let nodesToLoad = await eptLoader.selectNodesForViewport(viewport);
