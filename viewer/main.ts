@@ -78,7 +78,6 @@ function initLidarControl(): LidarControl {
     opacity: 1.0,
     colorScheme: 'elevation',
     restoreFromUrl: false,
-    colorAttributes: ['HeightAboveGround']
   });
 
   return lidarControl;
