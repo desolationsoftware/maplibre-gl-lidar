@@ -1,4 +1,4 @@
-import type { PointCloudData } from '../loaders/types';
+import type { AttributeArray, PointCloudData } from '../loaders/types';
 import type { ColormapName, ColorRangeConfig, ColorScheme, ColorSchemeConfig } from '../core/types';
 import type { ClassificationColorMap, ColorRamp, RGBColor } from './types';
 import { computePercentileBounds } from '../utils/helpers';
@@ -81,6 +81,8 @@ export interface ColorResult {
   colors: Uint8Array;
   /** The computed bounds used for coloring */
   bounds?: { min: number; max: number };
+  /** Full range of the colored values, before any color range or percentile clipping */
+  dataBounds?: { min: number; max: number };
 }
 
 /**
@@ -89,23 +91,8 @@ export interface ColorResult {
 export class ColorSchemeProcessor {
   /** Last computed color bounds (for colorbar display) */
   private _lastComputedBounds?: { min: number; max: number };
-  /** Full range of the last gradient-colored values (for range controls) */
-  private _lastDataBounds?: { min: number; max: number };
   /** Whether the categorical-not-implemented warning has been logged */
   private _warnedCategorical = false;
-
-  /**
-   * Generates a color array for the point cloud based on the color scheme.
-   *
-   * @param data - Point cloud data
-   * @param scheme - Color scheme to apply
-   * @param options - Optional color generation options
-   * @returns Uint8Array of RGBA colors (length = pointCount * 4)
-   */
-  getColors(data: PointCloudData, scheme: ColorScheme, options: ColorOptions = {}): Uint8Array {
-    const result = this.getColorsWithBounds(data, scheme, options);
-    return result.colors;
-  }
 
   /**
    * Generates a color array and returns the computed bounds.
@@ -156,16 +143,6 @@ export class ColorSchemeProcessor {
   }
 
   /**
-   * Gets the full range of the last gradient-colored values, before any
-   * color range or percentile clipping (for absolute range controls).
-   *
-   * @returns The last data bounds or undefined
-   */
-  getLastDataBounds(): { min: number; max: number } | undefined {
-    return this._lastDataBounds;
-  }
-
-  /**
    * Computes the color bounds based on the configuration.
    *
    * @param values - Array of values to compute bounds for
@@ -175,7 +152,7 @@ export class ColorSchemeProcessor {
    * @returns Computed min and max bounds
    */
   private _computeBounds(
-    values: Float32Array,
+    values: ArrayLike<number>,
     dataBounds: { min: number; max: number },
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean
@@ -351,10 +328,11 @@ export class ColorSchemeProcessor {
     }
 
     const values = getAttributeValues(data, config.attribute);
-    if (!values) {
-      // This point cloud lacks the attribute. Draw it in a neutral color, with
-      // no bounds, so it isn't mistaken for colored data and the colorbar keeps
-      // the range of a cloud that has the attribute.
+    const valueBounds = values ? computeValueBounds(values, data.pointCount) : undefined;
+    if (!values || !valueBounds) {
+      // This point cloud lacks the attribute (or has only no-data values). Draw
+      // it in a neutral color, with no bounds, so it isn't mistaken for colored
+      // data and the colorbar keeps the range of a cloud that has the attribute.
       for (let i = 0; i < data.pointCount; i++) {
         colors[i * 4] = MISSING_ATTRIBUTE_COLOR[0];
         colors[i * 4 + 1] = MISSING_ATTRIBUTE_COLOR[1];
@@ -364,13 +342,14 @@ export class ColorSchemeProcessor {
       return { colors };
     }
 
-    const ramp = parseColorRamp(config.colors) ?? COLORMAPS[colormap] ?? COLORMAPS.viridis;
-    const domain = config.domain ? { min: config.domain[0], max: config.domain[1] } : undefined;
+    const ramp = getCustomColorRamp(config) ?? COLORMAPS[colormap] ?? COLORMAPS.viridis;
+    const domain = config.domain ? { min: config.domain[0], max: config.domain[1] } : valueBounds;
     return this._colorByValues(data, colors, values, ramp, colorRange, usePercentile, domain);
   }
 
   /**
-   * Colors points along a color ramp by per-point values.
+   * Colors points along a color ramp by per-point values. NaN values (no-data)
+   * are drawn in the missing-attribute color.
    *
    * @param data - Point cloud data
    * @param colors - Output color array
@@ -378,21 +357,18 @@ export class ColorSchemeProcessor {
    * @param ramp - Color ramp to interpolate
    * @param colorRange - Color range configuration
    * @param usePercentile - Legacy percentile flag
-   * @param domain - Full range of the values; computed from `values` when omitted
-   * @returns ColorResult with colors and computed bounds
+   * @param dataBounds - Full range of the values; computed from `values` when omitted
+   * @returns ColorResult with colors, computed bounds and data bounds
    */
   private _colorByValues(
     data: PointCloudData,
     colors: Uint8Array,
-    values: Float32Array,
+    values: ArrayLike<number>,
     ramp: ColorRamp,
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean,
-    domain?: { min: number; max: number },
+    dataBounds: { min: number; max: number } = computeValueBounds(values, data.pointCount) ?? { min: 0, max: 1 },
   ): ColorResult {
-    const dataBounds = domain ?? computeValueBounds(values, data.pointCount);
-    this._lastDataBounds = dataBounds;
-
     // Compute color bounds based on configuration
     const bounds = this._computeBounds(values, dataBounds, colorRange, usePercentile);
     this._lastComputedBounds = bounds;
@@ -401,15 +377,15 @@ export class ColorSchemeProcessor {
     const range = max - min || 1;
 
     for (let i = 0; i < data.pointCount; i++) {
-      const t = (values[i] - min) / range;
-      const color = this._interpolateRamp(ramp, t);
+      const value = values[i];
+      const color = Number.isNaN(value) ? MISSING_ATTRIBUTE_COLOR : this._interpolateRamp(ramp, (value - min) / range);
       colors[i * 4] = color[0];
       colors[i * 4 + 1] = color[1];
       colors[i * 4 + 2] = color[2];
       colors[i * 4 + 3] = 255;
     }
 
-    return { colors, bounds };
+    return { colors, bounds, dataBounds };
   }
 
   /**
@@ -505,17 +481,6 @@ export function domainKeyToColorScheme(value: string): ColorScheme {
 }
 
 /**
- * Lists the extra attribute names on a point cloud
- * that can be used as a custom "color by" attribute.
- *
- * @param data - Point cloud data
- * @returns Attribute names
- */
-export function getAvailableAttributeNames(data: PointCloudData): string[] {
-  return data.extraAttributes ? Object.keys(data.extraAttributes) : [];
-}
-
-/**
  * Checks whether a color scheme colors points along a continuous gradient
  * (elevation, intensity or a custom attribute) and so uses the colormap,
  * colorbar and color range controls.
@@ -543,24 +508,33 @@ export function formatAttributeLabel(name: string): string {
 }
 
 /**
- * Extracts an extra attribute's values as a Float32Array
+ * Gets an extra attribute's values, in their stored type
  *
  * @param data - Point cloud data
  * @param attribute - Attribute name (key into data.extraAttributes)
  * @returns Per-point values, or undefined if the point cloud lacks the attribute
  */
-export function getAttributeValues(data: PointCloudData, attribute: string): Float32Array | undefined {
+export function getAttributeValues(data: PointCloudData, attribute: string): AttributeArray | undefined {
   const source = data.extraAttributes?.[attribute];
-  if (!source || source.length === 0) {
-    return undefined;
-  }
-  return source instanceof Float32Array ? source : Float32Array.from(source);
+  return source && source.length > 0 ? source : undefined;
 }
 
 /**
- * Computes the min and max of the first `count` values.
+ * Gets the custom color ramp of a color scheme, if it has one.
+ *
+ * @param scheme - Color scheme
+ * @returns The ramp from the scheme's `colors`, or undefined to use the colormap
  */
-function computeValueBounds(values: Float32Array, count: number): { min: number; max: number } {
+export function getCustomColorRamp(scheme: ColorScheme): ColorRamp | undefined {
+  return typeof scheme === 'string' ? undefined : parseColorRamp(scheme.colors);
+}
+
+/**
+ * Computes the min and max of the first `count` values, ignoring NaN.
+ *
+ * @returns The bounds, or undefined if there are no non-NaN values
+ */
+function computeValueBounds(values: ArrayLike<number>, count: number): { min: number; max: number } | undefined {
   let min = Infinity;
   let max = -Infinity;
   for (let i = 0; i < count; i++) {
@@ -572,7 +546,7 @@ function computeValueBounds(values: Float32Array, count: number): { min: number;
       max = value;
     }
   }
-  return { min, max };
+  return min <= max ? { min, max } : undefined;
 }
 
 /**

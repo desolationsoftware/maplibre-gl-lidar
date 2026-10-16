@@ -7,7 +7,7 @@ import { Colorbar } from './Colorbar';
 import { PercentileRangeControl } from './PercentileRangeControl';
 import { formatNumber } from '../utils/helpers';
 import { COLORMAP_LABELS, COLORMAP_NAMES } from '../colorizers/Colormaps';
-import { colorSchemeToDomainKey, domainKeyToColorScheme, formatAttributeLabel, isGradientColorScheme } from '../colorizers/ColorScheme';
+import { colorSchemeToDomainKey, domainKeyToColorScheme, formatAttributeLabel, getCustomColorRamp, isGradientColorScheme } from '../colorizers/ColorScheme';
 
 /**
  * Callbacks for panel interactions
@@ -44,13 +44,13 @@ export class PanelBuilder {
   private _state: LidarState;
   private _sampleData: LidarSampleDataset[];
   private _sampleDataLabel: string;
+  private _colorAttributes: string[];
 
   // UI component references
   private _fileInput?: FileInput;
   private _urlInput?: HTMLInputElement;
   private _loadButton?: HTMLButtonElement;
   private _colorSelect?: HTMLSelectElement;
-  private _colorSelectAttributes?: string;
   private _colormapSelect?: HTMLSelectElement;
   private _colormapGroup?: HTMLElement;
   private _colorbar?: Colorbar;
@@ -78,12 +78,13 @@ export class PanelBuilder {
   constructor(
     callbacks: PanelBuilderCallbacks,
     initialState: LidarState,
-    options?: { sampleData?: LidarSampleDataset[]; sampleDataLabel?: string },
+    options?: { sampleData?: LidarSampleDataset[]; sampleDataLabel?: string; colorAttributes?: string[] },
   ) {
     this._callbacks = callbacks;
     this._state = initialState;
     this._sampleData = options?.sampleData ?? [];
     this._sampleDataLabel = options?.sampleDataLabel ?? 'Load sample data...';
+    this._colorAttributes = options?.colorAttributes ?? [];
   }
 
   /**
@@ -166,7 +167,6 @@ export class PanelBuilder {
 
     // Update color scheme
     if (this._colorSelect) {
-      this._syncColorOptions();
       this._colorSelect.value = colorSchemeToDomainKey(state.colorScheme);
       this._updatePercentileVisibility(state.colorScheme);
     }
@@ -181,6 +181,7 @@ export class PanelBuilder {
       if (state.colormap) {
         this._colorbar.setColormap(state.colormap);
       }
+      this._colorbar.setRamp(getCustomColorRamp(state.colorScheme));
       if (state.computedColorBounds) {
         this._colorbar.setRange(state.computedColorBounds.min, state.computedColorBounds.max);
       }
@@ -453,7 +454,8 @@ export class PanelBuilder {
     const colorSelect = document.createElement('select');
     colorSelect.className = 'lidar-control-select';
     this._colorSelect = colorSelect;
-    this._syncColorOptions();
+    this._addColorOptions(colorSelect);
+    // An attribute that isn't in colorAttributes matches no option and shows blank
     colorSelect.value = colorSchemeToDomainKey(this._state.colorScheme);
     colorSelect.addEventListener('change', () => {
       const scheme = domainKeyToColorScheme(colorSelect.value);
@@ -514,38 +516,20 @@ export class PanelBuilder {
   }
 
   /**
-   * Rebuilds the "Color By" options when the available attributes change.
-   * The current scheme's attribute is included even before data with it has
-   * loaded, so a configured attribute scheme stays selected.
+   * Adds the "Color By" options: the built-in schemes, then the configured
+   * colorAttributes.
    */
-  private _syncColorOptions(): void {
-    const select = this._colorSelect;
-    if (!select) {
-      return;
-    }
-
-    const attributes = new Set(this._state.availableAttributes);
-    if (typeof this._state.colorScheme !== 'string') {
-      attributes.add(this._state.colorScheme.attribute);
-    }
-    const names = [ ...attributes ].sort();
-    const key = names.join('\n');
-    if (key === this._colorSelectAttributes) {
-      return;
-    }
-    this._colorSelectAttributes = key;
-
-    const previousValue = select.value;
+  private _addColorOptions(select: HTMLSelectElement): void {
     select.innerHTML = `
       <option value="elevation">Elevation</option>
       <option value="intensity">Intensity</option>
       <option value="classification">Classification</option>
       <option value="rgb">RGB (if available)</option>
     `;
-    if (names.length > 0) {
+    if (this._colorAttributes.length > 0) {
       const group = document.createElement('optgroup');
       group.label = 'Attributes';
-      for (const name of names) {
+      for (const name of this._colorAttributes) {
         const option = document.createElement('option');
         option.value = colorSchemeToDomainKey({ type: 'gradient', attribute: name });
         option.textContent = formatAttributeLabel(name);
@@ -553,7 +537,6 @@ export class PanelBuilder {
       }
       select.appendChild(group);
     }
-    select.value = previousValue;
   }
 
   /**
@@ -832,8 +815,7 @@ export class PanelBuilder {
     this._colorbarContainer = container;
 
     // Set initial visibility based on current color scheme
-    const showColorbar = isGradientColorScheme(this._state.colorScheme) && this._state.showColorbar;
-    container.style.display = showColorbar ? 'block' : 'none';
+    container.style.display = this._showColorbar(this._state.colorScheme) ? 'block' : 'none';
 
     // Create the colorbar
     this._colorbar = new Colorbar({
@@ -841,6 +823,7 @@ export class PanelBuilder {
       minValue: this._state.computedColorBounds?.min ?? 0,
       maxValue: this._state.computedColorBounds?.max ?? 100,
     });
+    this._colorbar.setRamp(getCustomColorRamp(this._state.colorScheme));
 
     container.appendChild(this._colorbar.render());
     return container;
@@ -879,6 +862,18 @@ export class PanelBuilder {
   }
 
   /**
+   * Whether to show the colorbar: for gradient schemes, except a custom
+   * attribute that no loaded point cloud has, which has no range to show.
+   */
+  private _showColorbar(colorScheme: ColorScheme): boolean {
+    return (
+      isGradientColorScheme(colorScheme) &&
+      this._state.showColorbar &&
+      (typeof colorScheme === 'string' || this._state.computedColorBounds !== undefined)
+    );
+  }
+
+  /**
    * Updates the visibility of color-related controls based on color scheme.
    * Shows colormap/colorbar/range for gradient schemes (elevation, intensity
    * or a custom attribute). Shows classification legend for classification.
@@ -893,7 +888,7 @@ export class PanelBuilder {
 
     // Show/hide colorbar
     if (this._colorbarContainer) {
-      this._colorbarContainer.style.display = showColorControls && this._state.showColorbar ? 'block' : 'none';
+      this._colorbarContainer.style.display = this._showColorbar(colorScheme) ? 'block' : 'none';
     }
 
     // Show/hide color range control and update bounds for the new scheme

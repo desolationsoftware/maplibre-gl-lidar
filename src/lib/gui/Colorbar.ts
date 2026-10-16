@@ -1,4 +1,5 @@
 import type { ColormapName } from '../core/types';
+import type { ColorRamp } from '../colorizers/types';
 import { COLORMAPS } from '../colorizers/Colormaps';
 
 /**
@@ -21,6 +22,8 @@ export interface ColorbarOptions {
  */
 export class Colorbar {
   private _options: ColorbarOptions;
+  /** Custom color ramp, shown instead of the colormap when set */
+  private _ramp?: ColorRamp;
   private _canvas?: HTMLCanvasElement;
   private _minLabel?: HTMLElement;
   private _maxLabel?: HTMLElement;
@@ -116,6 +119,16 @@ export class Colorbar {
   }
 
   /**
+   * Sets a custom color ramp to show instead of the colormap.
+   *
+   * @param ramp - The color ramp, or undefined to show the colormap
+   */
+  setRamp(ramp: ColorRamp | undefined): void {
+    this._ramp = ramp;
+    this._drawGradient();
+  }
+
+  /**
    * Sets the value range.
    *
    * @param min - Minimum value
@@ -159,7 +172,7 @@ export class Colorbar {
 
     const width = this._canvas.width;
     const height = this._canvas.height;
-    const ramp = COLORMAPS[this._options.colormap] || COLORMAPS.viridis;
+    const ramp = this._ramp ?? COLORMAPS[this._options.colormap] ?? COLORMAPS.viridis;
 
     // Create gradient
     const gradient = ctx.createLinearGradient(0, 0, width, 0);

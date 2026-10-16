@@ -14,7 +14,6 @@ export {
   getClassificationName,
   getClassificationColor,
   getAttributeValues,
-  getAvailableAttributeNames,
   isGradientColorScheme,
   formatAttributeLabel,
   type ClassificationStyles,

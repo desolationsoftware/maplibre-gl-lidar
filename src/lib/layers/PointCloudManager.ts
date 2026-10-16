@@ -21,6 +21,8 @@ interface ManagedPointCloud {
   opacityOverride: number | null;
   /** Number of deck.gl chunk layers currently created for this point cloud */
   chunkCount: number;
+  /** Full range of the gradient-colored values, if the current scheme yielded one */
+  dataBounds?: { min: number; max: number };
 }
 
 /**
@@ -93,6 +95,7 @@ export class PointCloudManager {
       visible: true,
       opacityOverride: null,
       chunkCount: 0,
+      dataBounds: result.dataBounds,
     });
     this._createLayer(id);
   }
@@ -146,6 +149,7 @@ export class PointCloudManager {
         visible: existing.visible,
         opacityOverride: existing.opacityOverride,
         chunkCount: existing.chunkCount,
+        dataBounds: result.dataBounds,
       });
 
       // Recreate layers with new data
@@ -238,6 +242,9 @@ export class PointCloudManager {
       hiddenClassificationsChanged ||
       classificationStylesChanged
     ) {
+      // Drop bounds from the previous settings, which may yield none (e.g. no
+      // point cloud has the color-by attribute)
+      this._lastComputedBounds = undefined;
       for (const [id, pc] of this._pointClouds) {
         const result = this._colorProcessor.getColorsWithBounds(pc.data, this._options.colorScheme, {
           usePercentile: this._options.usePercentile,
@@ -258,6 +265,7 @@ export class PointCloudManager {
           coordinateOrigin: pc.coordinateOrigin,
           visible: pc.visible,
           opacityOverride: pc.opacityOverride,
+          dataBounds: result.dataBounds,
         });
       }
     }
@@ -462,11 +470,21 @@ export class PointCloudManager {
   }
 
   /**
-   * Gets the full range of the last gradient-colored values.
+   * Gets the full range of the gradient-colored values across all point clouds.
    * Used as the slider range for absolute color range controls.
+   *
+   * @returns The combined range, or undefined if no point cloud yielded one
    */
-  getLastDataBounds(): { min: number; max: number } | undefined {
-    return this._colorProcessor.getLastDataBounds();
+  getDataBounds(): { min: number; max: number } | undefined {
+    let bounds: { min: number; max: number } | undefined;
+    for (const pc of this._pointClouds.values()) {
+      if (pc.dataBounds) {
+        bounds = bounds
+          ? { min: Math.min(bounds.min, pc.dataBounds.min), max: Math.max(bounds.max, pc.dataBounds.max) }
+          : pc.dataBounds;
+      }
+    }
+    return bounds;
   }
 
   /**

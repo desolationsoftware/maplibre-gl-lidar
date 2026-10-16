@@ -159,6 +159,14 @@ export interface LidarControlOptions {
   colorScheme?: ColorScheme;
 
   /**
+   * Extra point attributes (e.g. 'Amplitude') offered in the "Color By" menu,
+   * as named in the point cloud file. Point clouds without an attribute are
+   * drawn grey when colored by it.
+   * @default []
+   */
+  colorAttributes?: string[];
+
+  /**
    * Whether to use percentile range (2-98%) for elevation/intensity coloring.
    * When true, outliers are clipped for better color distribution.
    * @default true
@@ -366,8 +374,6 @@ export interface LidarState {
   hiddenClassifications: Set<number>;
   /** Set of classification codes present in loaded point cloud data */
   availableClassifications: Set<number>;
-  /** Set of extra attribute names present in loaded point cloud data */
-  availableAttributes: Set<string>;
   /** Per-code classification name/colour overrides (custom classes) */
   classificationStyles?: ClassificationStyles;
   /** Whether 3D terrain is enabled */
