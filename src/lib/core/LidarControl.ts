@@ -30,7 +30,14 @@ import { CrossSectionTool } from '../tools/CrossSectionTool';
 import { ElevationProfileExtractor } from '../tools/ElevationProfileExtractor';
 import { computePercentileBounds, generateId, getFilename } from '../utils/helpers';
 import { createLidarSharePayload, createLidarShareUrl, parseLidarSharePayloadFromUrl } from '../utils/share-url';
-import { type ClassificationStyles, colorSchemeToDomainKey, getAvailableAttributeNames, getAvailableClassifications, getClassificationName, isGradientColorScheme } from '../colorizers/ColorScheme';
+import { type ClassificationStyles, colorSchemeToDomainKey, getAvailableClassifications, getClassificationName, isGradientColorScheme } from '../colorizers/ColorScheme';
+
+/**
+ * Checks whether two optional bounds are equal.
+ */
+function boundsEqual(a?: { min: number; max: number }, b?: { min: number; max: number }): boolean {
+  return a === b || (a !== undefined && b !== undefined && a.min === b.min && a.max === b.max);
+}
 
 /**
  * Default options for the LidarControl
@@ -48,6 +55,7 @@ const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'co
   minPointSizeMeters: 0,
   opacity: 1.0,
   colorScheme: 'elevation',
+  colorAttributes: [],
   usePercentile: true,
   colormap: 'viridis',
   colorRange: { mode: 'percentile', percentileLow: 2, percentileHigh: 98 },
@@ -997,6 +1005,7 @@ export class LidarControl implements IControl {
       // Setup callback for when points are loaded
       streamingLoader.setOnPointsLoaded((data) => {
         this._pointCloudManager?.updatePointCloud(id, data);
+        this._refreshAttributeColorBounds();
 
         // Auto Z offset: use bounds.minZ from the COPC header (reliable source)
         if (this._options.autoZOffset && !this._manualZOffset && !autoZOffsetApplied && data.bounds) {
@@ -1239,6 +1248,7 @@ export class LidarControl implements IControl {
       // Setup callback for when points are loaded
       eptLoader.setOnPointsLoaded((data) => {
         this._pointCloudManager?.updatePointCloud(id, data);
+        this._refreshAttributeColorBounds();
 
         // Auto Z offset
         if (this._options.autoZOffset && !this._manualZOffset && !autoZOffsetApplied && data.bounds) {
@@ -1927,7 +1937,9 @@ export class LidarControl implements IControl {
 
   /**
    * Sets the color scheme.
-   * Automatically switches colormap and resets color range when changing between elevation and intensity.
+   * Automatically switches colormap when changing to or from intensity, and resets
+   * the color range when changing between gradient domains (elevation, intensity,
+   * or a custom attribute).
    *
    * @param scheme - Color scheme to apply
    */
@@ -1936,31 +1948,29 @@ export class LidarControl implements IControl {
     this._state.colorScheme = scheme;
     this._pointCloudManager?.setColorScheme(scheme);
 
-    // Auto-switch colormap and reset color range when changing between elevation and intensity
-    if (typeof scheme === 'string' && typeof previousScheme === 'string') {
-      const isNewElevationOrIntensity = scheme === 'elevation' || scheme === 'intensity';
-      const wasElevationOrIntensity = previousScheme === 'elevation' || previousScheme === 'intensity';
-      const switchedBetweenElevationAndIntensity = isNewElevationOrIntensity && wasElevationOrIntensity && scheme !== previousScheme;
+    // Auto-switch colormap and reset color range when changing between domains
+    const domainChanged =
+      isGradientColorScheme(scheme) &&
+      isGradientColorScheme(previousScheme) &&
+      colorSchemeToDomainKey(scheme) !== colorSchemeToDomainKey(previousScheme);
+    if (domainChanged) {
+      // Reset color range to default percentile mode
+      this._state.colorRange = {
+        mode: 'percentile',
+        percentileLow: 2,
+        percentileHigh: 98,
+      };
+      this._pointCloudManager?.setColorRange(this._state.colorRange);
+    }
 
-      if (switchedBetweenElevationAndIntensity) {
-        // Reset color range to default percentile mode
-        this._state.colorRange = {
-          mode: 'percentile',
-          percentileLow: 2,
-          percentileHigh: 98,
-        };
-        this._pointCloudManager?.setColorRange(this._state.colorRange);
-      }
-
-      if (scheme === 'intensity' && previousScheme !== 'intensity') {
-        // Switch to grayscale for intensity
-        this._state.colormap = 'gray';
-        this._pointCloudManager?.setColormap('gray');
-      } else if (scheme === 'elevation' && previousScheme === 'intensity') {
-        // Switch back to viridis for elevation
-        this._state.colormap = 'viridis';
-        this._pointCloudManager?.setColormap('viridis');
-      }
+    if (scheme === 'intensity' && previousScheme !== 'intensity') {
+      // Switch to grayscale for intensity
+      this._state.colormap = 'gray';
+      this._pointCloudManager?.setColormap('gray');
+    } else if (previousScheme === 'intensity' && isGradientColorScheme(scheme)) {
+      // Switch back to viridis when leaving intensity for another gradient
+      this._state.colormap = 'viridis';
+      this._pointCloudManager?.setColormap('viridis');
     }
 
     // Update computed color bounds for the new scheme
@@ -2303,28 +2313,53 @@ export class LidarControl implements IControl {
   }
 
   /**
+   * Refreshes the color bounds while streaming, when coloring by a custom
+   * attribute. Its range isn't known until data with the attribute arrives.
+   */
+  private _refreshAttributeColorBounds(): void {
+    if (typeof this._state.colorScheme === 'string') {
+      return;
+    }
+    const { computedColorBounds, attributeDataBounds } = this._state;
+    this._updateComputedColorBounds();
+    if (
+      !boundsEqual(computedColorBounds, this._state.computedColorBounds) ||
+      !boundsEqual(attributeDataBounds, this._state.attributeDataBounds)
+    ) {
+      this._panelBuilder?.updateState(this._state);
+    }
+  }
+
+  /**
    * Updates the computed color bounds based on the current color scheme and range settings.
    * This is used to display accurate min/max values in the colorbar.
    */
   private _updateComputedColorBounds(): void {
     if (this._state.pointClouds.length === 0) {
       this._state.computedColorBounds = undefined;
+      this._state.attributeDataBounds = undefined;
       return;
     }
+
+    // Attribute ranges aren't in the point cloud info, so take the colorizer's
+    // range across all point clouds
+    const colorScheme = this._state.colorScheme;
+    this._state.attributeDataBounds =
+      typeof colorScheme === 'string' ? undefined : this._pointCloudManager?.getDataBounds();
 
     // Get the actual computed bounds from PointCloudManager
     // This returns the real bounds used for coloring (including actual percentile calculations)
     const actualBounds = this._pointCloudManager?.getLastComputedBounds();
     if (actualBounds) {
       this._state.computedColorBounds = actualBounds;
-    } else {
+    } else if (typeof colorScheme !== 'string') {
+      // No point cloud has the attribute (yet)
+      this._state.computedColorBounds = this._state.attributeDataBounds;
+    } else if (colorScheme === 'intensity') {
       // Fallback to data bounds if no computed bounds available
-      const colorScheme = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
-      if (colorScheme === 'intensity') {
-        this._state.computedColorBounds = this._getIntensityBounds();
-      } else {
-        this._state.computedColorBounds = this._getElevationBounds();
-      }
+      this._state.computedColorBounds = this._getIntensityBounds();
+    } else {
+      this._state.computedColorBounds = this._getElevationBounds();
     }
   }
 
@@ -2458,6 +2493,7 @@ export class LidarControl implements IControl {
       {
         sampleData: this._options.sampleData,
         sampleDataLabel: this._options.sampleDataLabel,
+        colorAttributes: this._options.colorAttributes,
         pointSizeReferenceZoom: this._options.pointSizeReferenceZoom,
       }
     );

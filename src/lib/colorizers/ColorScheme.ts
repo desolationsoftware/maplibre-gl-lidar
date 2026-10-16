@@ -1,8 +1,16 @@
-import type { PointCloudData } from '../loaders/types';
-import type { ColorScheme, ColorSchemeConfig, ColormapName, ColorRangeConfig } from '../core/types';
-import type { RGBColor, ColorRamp, ClassificationColorMap } from './types';
+import type { AttributeArray, PointCloudData } from '../loaders/types';
+import type { ColormapName, ColorRangeConfig, ColorScheme, ColorSchemeConfig } from '../core/types';
+import type { ClassificationColorMap, ColorRamp, RGBColor } from './types';
 import { computePercentileBounds } from '../utils/helpers';
 import { COLORMAPS } from './Colormaps';
+
+/**
+ * Color for point clouds that lack the attribute a custom scheme colors by
+ */
+const MISSING_ATTRIBUTE_COLOR: RGBColor = [ 128, 128, 128 ];
+
+/** Prefix for custom attribute schemes */
+const ATTRIBUTE_OPTION_PREFIX = 'attr:';
 
 /**
  * ASPRS LAS classification standard colors
@@ -73,6 +81,8 @@ export interface ColorResult {
   colors: Uint8Array;
   /** The computed bounds used for coloring */
   bounds?: { min: number; max: number };
+  /** Full range of the colored values, before any color range or percentile clipping */
+  dataBounds?: { min: number; max: number };
 }
 
 /**
@@ -81,6 +91,8 @@ export interface ColorResult {
 export class ColorSchemeProcessor {
   /** Last computed color bounds (for colorbar display) */
   private _lastComputedBounds?: { min: number; max: number };
+  /** Whether the categorical-not-implemented warning has been logged */
+  private _warnedCategorical = false;
 
   /**
    * Generates a color array for the point cloud based on the color scheme.
@@ -130,7 +142,7 @@ export class ColorSchemeProcessor {
           return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
       }
     } else {
-      return { colors: this._colorByCustom(data, colors, scheme, colormap, colorRange, usePercentile) };
+      return this._colorByCustom(data, colors, scheme, colormap, colorRange, usePercentile);
     }
   }
 
@@ -153,7 +165,7 @@ export class ColorSchemeProcessor {
    * @returns Computed min and max bounds
    */
   private _computeBounds(
-    values: Float32Array,
+    values: ArrayLike<number>,
     dataBounds: { min: number; max: number },
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean
@@ -207,31 +219,14 @@ export class ColorSchemeProcessor {
       zValues[i] = data.positions[i * 3 + 2] ?? 0;
     }
 
-    // Compute data bounds
+    // Use the header bounds rather than scanning every Z value
     const dataBounds = {
       min: data.bounds?.minZ ?? 0,
       max: data.bounds?.maxZ ?? 1,
     };
 
-    // Compute color bounds based on configuration
-    const bounds = this._computeBounds(zValues, dataBounds, colorRange, usePercentile);
-    this._lastComputedBounds = bounds;
-
-    const { min: minZ, max: maxZ } = bounds;
-    const range = maxZ - minZ || 1;
     const ramp = COLORMAPS[colormap] || COLORMAPS.viridis;
-
-    for (let i = 0; i < data.pointCount; i++) {
-      const z = zValues[i];
-      const t = (z - minZ) / range;
-      const color = this._interpolateRamp(ramp, t);
-      colors[i * 4] = color[0];
-      colors[i * 4 + 1] = color[1];
-      colors[i * 4 + 2] = color[2];
-      colors[i * 4 + 3] = 255;
-    }
-
-    return { colors, bounds };
+    return this._colorByValues(data, colors, zValues, ramp, colorRange, usePercentile, dataBounds);
   }
 
   /**
@@ -256,35 +251,8 @@ export class ColorSchemeProcessor {
       return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
     }
 
-    // Compute data bounds
-    let minI = Infinity;
-    let maxI = -Infinity;
-    for (let i = 0; i < data.pointCount; i++) {
-      const intensity = data.intensities[i];
-      if (intensity < minI) minI = intensity;
-      if (intensity > maxI) maxI = intensity;
-    }
-    const dataBounds = { min: minI, max: maxI };
-
-    // Compute color bounds based on configuration
-    const bounds = this._computeBounds(data.intensities, dataBounds, colorRange, usePercentile);
-    this._lastComputedBounds = bounds;
-
-    const { min: minVal, max: maxVal } = bounds;
-    const range = maxVal - minVal || 1;
     const ramp = COLORMAPS[colormap] || COLORMAPS.gray;
-
-    for (let i = 0; i < data.pointCount; i++) {
-      const intensity = data.intensities[i];
-      const t = (intensity - minVal) / range;
-      const color = this._interpolateRamp(ramp, t);
-      colors[i * 4] = color[0];
-      colors[i * 4 + 1] = color[1];
-      colors[i * 4 + 2] = color[2];
-      colors[i * 4 + 3] = 255;
-    }
-
-    return { colors, bounds };
+    return this._colorByValues(data, colors, data.intensities, ramp, colorRange, usePercentile);
   }
 
   /**
@@ -344,28 +312,93 @@ export class ColorSchemeProcessor {
   }
 
   /**
-   * Applies a custom color scheme configuration.
+   * Applies a custom color scheme configuration, coloring by an arbitrary
+   * point attribute.
+   *
+   * `categorical` configs are not implemented yet and are drawn as gradients,
+   * with a one-time warning.
    *
    * @param data - Point cloud data
    * @param colors - Output color array
-   * @param _config - Custom color scheme config
-   * @param colormap - Colormap name to use
+   * @param config - Custom color scheme config
+   * @param colormap - Colormap name to use when the config has no colors
    * @param colorRange - Color range configuration
    * @param usePercentile - Legacy percentile flag
-   * @returns Color array
+   * @returns ColorResult with colors and computed bounds
    */
   private _colorByCustom(
     data: PointCloudData,
     colors: Uint8Array,
-    _config: ColorSchemeConfig,
+    config: ColorSchemeConfig,
     colormap: ColormapName,
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean
-  ): Uint8Array {
-    // For now, fall back to elevation for custom configs
-    // This can be extended to support custom gradients
-    const result = this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
-    return result.colors;
+  ): ColorResult {
+    if (config.type === 'categorical' && !this._warnedCategorical) {
+      // Warn once; this runs for every streamed node
+      this._warnedCategorical = true;
+      console.warn('Categorical color schemes are not implemented; drawing as a gradient');
+    }
+
+    const values = getAttributeValues(data, config.attribute);
+    const valueBounds = values ? computeValueBounds(values, data.pointCount) : undefined;
+    if (!values || !valueBounds) {
+      // This point cloud lacks the attribute (or has only no-data values). Draw
+      // it in a neutral color, with no bounds, so it isn't mistaken for colored
+      // data and the colorbar keeps the range of a cloud that has the attribute.
+      for (let i = 0; i < data.pointCount; i++) {
+        colors[i * 4] = MISSING_ATTRIBUTE_COLOR[0];
+        colors[i * 4 + 1] = MISSING_ATTRIBUTE_COLOR[1];
+        colors[i * 4 + 2] = MISSING_ATTRIBUTE_COLOR[2];
+        colors[i * 4 + 3] = 255;
+      }
+      return { colors };
+    }
+
+    const ramp = getCustomColorRamp(config) ?? COLORMAPS[colormap] ?? COLORMAPS.viridis;
+    const domain = config.domain ? { min: config.domain[0], max: config.domain[1] } : valueBounds;
+    return this._colorByValues(data, colors, values, ramp, colorRange, usePercentile, domain);
+  }
+
+  /**
+   * Colors points along a color ramp by per-point values. NaN values (no-data)
+   * are drawn in the missing-attribute color.
+   *
+   * @param data - Point cloud data
+   * @param colors - Output color array
+   * @param values - Per-point values (length = data.pointCount)
+   * @param ramp - Color ramp to interpolate
+   * @param colorRange - Color range configuration
+   * @param usePercentile - Legacy percentile flag
+   * @param dataBounds - Full range of the values; computed from `values` when omitted
+   * @returns ColorResult with colors, computed bounds and data bounds
+   */
+  private _colorByValues(
+    data: PointCloudData,
+    colors: Uint8Array,
+    values: ArrayLike<number>,
+    ramp: ColorRamp,
+    colorRange?: ColorRangeConfig,
+    usePercentile?: boolean,
+    dataBounds: { min: number; max: number } = computeValueBounds(values, data.pointCount) ?? { min: 0, max: 1 },
+  ): ColorResult {
+    // Compute color bounds based on configuration
+    const bounds = this._computeBounds(values, dataBounds, colorRange, usePercentile);
+    this._lastComputedBounds = bounds;
+
+    const { min, max } = bounds;
+    const range = max - min || 1;
+
+    for (let i = 0; i < data.pointCount; i++) {
+      const value = values[i];
+      const color = Number.isNaN(value) ? MISSING_ATTRIBUTE_COLOR : this._interpolateRamp(ramp, (value - min) / range);
+      colors[i * 4] = color[0];
+      colors[i * 4 + 1] = color[1];
+      colors[i * 4 + 2] = color[2];
+      colors[i * 4 + 3] = 255;
+    }
+
+    return { colors, bounds, dataBounds };
   }
 
   /**
@@ -440,4 +473,113 @@ export function getAvailableClassifications(data: PointCloudData): Set<number> {
     }
   }
   return classifications;
+}
+
+/**
+ * Converts a color scheme into a string domain key.
+ */
+export function colorSchemeToDomainKey(scheme: ColorScheme): string {
+  return typeof scheme === 'string' ? scheme : `${ATTRIBUTE_OPTION_PREFIX}${scheme.attribute}`;
+}
+
+/**
+ * Converts a domain key back into a gradient color scheme.
+ */
+export function domainKeyToColorScheme(value: string): ColorScheme {
+  if (value.startsWith(ATTRIBUTE_OPTION_PREFIX)) {
+    // If extra attributes can be colored other than 'gradient', build machinery to handle that
+    return { type: 'gradient', attribute: value.slice(ATTRIBUTE_OPTION_PREFIX.length) };
+  }
+  return value as ColorScheme;
+}
+
+/**
+ * Checks whether a color scheme colors points along a continuous gradient
+ * (elevation, intensity or a custom attribute) and so uses the colormap,
+ * colorbar and color range controls.
+ *
+ * @param scheme - Color scheme to check
+ * @returns True for gradient schemes, false for classification and rgb
+ */
+export function isGradientColorScheme(scheme: ColorScheme): boolean {
+  return typeof scheme === 'string' ? scheme === 'elevation' || scheme === 'intensity' : true;
+}
+
+/**
+ * Formats an attribute name for display, splitting CamelCase and
+ * underscores into words
+ *
+ * @param name - Attribute name
+ * @returns Display label
+ */
+export function formatAttributeLabel(name: string): string {
+  return name
+    .replace(/_/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .trim();
+}
+
+/**
+ * Gets an extra attribute's values, in their stored type
+ *
+ * @param data - Point cloud data
+ * @param attribute - Attribute name (key into data.extraAttributes)
+ * @returns Per-point values, or undefined if the point cloud lacks the attribute
+ */
+export function getAttributeValues(data: PointCloudData, attribute: string): AttributeArray | undefined {
+  const source = data.extraAttributes?.[attribute];
+  return source && source.length > 0 ? source : undefined;
+}
+
+/**
+ * Gets the custom color ramp of a color scheme, if it has one.
+ *
+ * @param scheme - Color scheme
+ * @returns The ramp from the scheme's `colors`, or undefined to use the colormap
+ */
+export function getCustomColorRamp(scheme: ColorScheme): ColorRamp | undefined {
+  return typeof scheme === 'string' ? undefined : parseColorRamp(scheme.colors);
+}
+
+/**
+ * Computes the min and max of the first `count` values, ignoring NaN.
+ *
+ * @returns The bounds, or undefined if there are no non-NaN values
+ */
+function computeValueBounds(values: ArrayLike<number>, count: number): { min: number; max: number } | undefined {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const value = values[i];
+    if (value < min) {
+      min = value;
+    }
+    if (value > max) {
+      max = value;
+    }
+  }
+  return min <= max ? { min, max } : undefined;
+}
+
+/**
+ * Parses CSS hex colors (`#rgb` or `#rrggbb`) into a color ramp.
+ *
+ * @returns The ramp, or undefined unless every color parses and there are at least two
+ */
+function parseColorRamp(hexColors?: string[]): ColorRamp | undefined {
+  if (!hexColors || hexColors.length < 2) {
+    return undefined;
+  }
+  const ramp: ColorRamp = [];
+  for (const hex of hexColors) {
+    const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+    if (!match) {
+      return undefined;
+    }
+    const digits = match[1].length === 3 ? match[1].replace(/./g, '$&$&') : match[1];
+    const n = parseInt(digits, 16);
+    ramp.push([ (n >> 16) & 255, (n >> 8) & 255, n & 255 ]);
+  }
+  return ramp;
 }

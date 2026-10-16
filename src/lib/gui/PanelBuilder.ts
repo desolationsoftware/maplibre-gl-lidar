@@ -1,11 +1,4 @@
-import type {
-  LidarState,
-  ColorScheme,
-  PointCloudInfo,
-  ColormapName,
-  ColorRangeConfig,
-  LidarSampleDataset,
-} from '../core/types';
+import type { ColormapName, ColorRangeConfig, ColorScheme, LidarSampleDataset, LidarState, PointCloudInfo } from '../core/types';
 import { FileInput } from './FileInput';
 import { RangeSlider } from './RangeSlider';
 import { DualRangeSlider } from './DualRangeSlider';
@@ -13,7 +6,8 @@ import { ClassificationLegend } from './ClassificationLegend';
 import { Colorbar } from './Colorbar';
 import { PercentileRangeControl } from './PercentileRangeControl';
 import { formatNumber } from '../utils/helpers';
-import { COLORMAP_NAMES, COLORMAP_LABELS } from '../colorizers/Colormaps';
+import { COLORMAP_LABELS, COLORMAP_NAMES } from '../colorizers/Colormaps';
+import { colorSchemeToDomainKey, domainKeyToColorScheme, formatAttributeLabel, getCustomColorRamp, isGradientColorScheme } from '../colorizers/ColorScheme';
 
 /**
  * Callbacks for panel interactions
@@ -50,6 +44,7 @@ export class PanelBuilder {
   private _state: LidarState;
   private _sampleData: LidarSampleDataset[];
   private _sampleDataLabel: string;
+  private _colorAttributes: string[];
   private _pointSizeReferenceZoom?: number;
 
   // UI component references
@@ -84,12 +79,13 @@ export class PanelBuilder {
   constructor(
     callbacks: PanelBuilderCallbacks,
     initialState: LidarState,
-    options?: { sampleData?: LidarSampleDataset[]; sampleDataLabel?: string; pointSizeReferenceZoom?: number },
+    options?: { sampleData?: LidarSampleDataset[]; sampleDataLabel?: string; colorAttributes?: string[]; pointSizeReferenceZoom?: number; },
   ) {
     this._callbacks = callbacks;
     this._state = initialState;
     this._sampleData = options?.sampleData ?? [];
     this._sampleDataLabel = options?.sampleDataLabel ?? 'Load sample data...';
+    this._colorAttributes = options?.colorAttributes ?? [];
     this._pointSizeReferenceZoom = options?.pointSizeReferenceZoom;
   }
 
@@ -172,8 +168,8 @@ export class PanelBuilder {
     }
 
     // Update color scheme
-    if (this._colorSelect && typeof state.colorScheme === 'string') {
-      this._colorSelect.value = state.colorScheme;
+    if (this._colorSelect) {
+      this._colorSelect.value = colorSchemeToDomainKey(state.colorScheme);
       this._updatePercentileVisibility(state.colorScheme);
     }
 
@@ -187,6 +183,7 @@ export class PanelBuilder {
       if (state.colormap) {
         this._colorbar.setColormap(state.colormap);
       }
+      this._colorbar.setRamp(getCustomColorRamp(state.colorScheme));
       if (state.computedColorBounds) {
         this._colorbar.setRange(state.computedColorBounds.min, state.computedColorBounds.max);
       }
@@ -458,19 +455,16 @@ export class PanelBuilder {
 
     const colorSelect = document.createElement('select');
     colorSelect.className = 'lidar-control-select';
-    colorSelect.innerHTML = `
-      <option value="elevation">Elevation</option>
-      <option value="intensity">Intensity</option>
-      <option value="classification">Classification</option>
-      <option value="rgb">RGB (if available)</option>
-    `;
-    colorSelect.value = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
-    colorSelect.addEventListener('change', () => {
-      this._callbacks.onColorSchemeChange(colorSelect.value as ColorScheme);
-      // Show/hide percentile option based on color scheme
-      this._updatePercentileVisibility(colorSelect.value);
-    });
     this._colorSelect = colorSelect;
+    this._addColorOptions(colorSelect);
+    // An attribute that isn't in colorAttributes matches no option and shows blank
+    colorSelect.value = colorSchemeToDomainKey(this._state.colorScheme);
+    colorSelect.addEventListener('change', () => {
+      const scheme = domainKeyToColorScheme(colorSelect.value);
+      this._callbacks.onColorSchemeChange(scheme);
+      // Show/hide percentile option based on color scheme
+      this._updatePercentileVisibility(scheme);
+    });
     colorGroup.appendChild(colorSelect);
     section.appendChild(colorGroup);
 
@@ -524,6 +518,30 @@ export class PanelBuilder {
     section.appendChild(this._buildZOffsetControl());
 
     return section;
+  }
+
+  /**
+   * Adds the "Color By" options: the built-in schemes, then the configured
+   * colorAttributes.
+   */
+  private _addColorOptions(select: HTMLSelectElement): void {
+    select.innerHTML = `
+      <option value="elevation">Elevation</option>
+      <option value="intensity">Intensity</option>
+      <option value="classification">Classification</option>
+      <option value="rgb">RGB (if available)</option>
+    `;
+    if (this._colorAttributes.length > 0) {
+      const group = document.createElement('optgroup');
+      group.label = 'Attributes';
+      for (const name of this._colorAttributes) {
+        const option = document.createElement('option');
+        option.value = colorSchemeToDomainKey({ type: 'gradient', attribute: name });
+        option.textContent = formatAttributeLabel(name);
+        group.appendChild(option);
+      }
+      select.appendChild(group);
+    }
   }
 
   /**
@@ -744,7 +762,10 @@ export class PanelBuilder {
    * Gets the appropriate data bounds based on the current color scheme.
    */
   private _getDataBoundsForCurrentScheme(): { min: number; max: number } {
-    const colorScheme = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
+    const colorScheme = this._state.colorScheme;
+    if (typeof colorScheme !== 'string') {
+      return this._state.attributeDataBounds ?? this._state.computedColorBounds ?? { min: 0, max: 1 };
+    }
     if (colorScheme === 'intensity') {
       return this._getIntensityBounds();
     }
@@ -760,9 +781,7 @@ export class PanelBuilder {
     this._colormapGroup = group;
 
     // Set initial visibility based on current color scheme
-    const currentScheme = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
-    const showColormap = currentScheme === 'elevation' || currentScheme === 'intensity';
-    group.style.display = showColormap ? 'block' : 'none';
+    group.style.display = isGradientColorScheme(this._state.colorScheme) ? 'block' : 'none';
 
     const label = document.createElement('label');
     label.className = 'lidar-control-label';
@@ -801,9 +820,7 @@ export class PanelBuilder {
     this._colorbarContainer = container;
 
     // Set initial visibility based on current color scheme
-    const currentScheme = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
-    const showColorbar = (currentScheme === 'elevation' || currentScheme === 'intensity') && this._state.showColorbar;
-    container.style.display = showColorbar ? 'block' : 'none';
+    container.style.display = this._showColorbar(this._state.colorScheme) ? 'block' : 'none';
 
     // Create the colorbar
     this._colorbar = new Colorbar({
@@ -811,6 +828,7 @@ export class PanelBuilder {
       minValue: this._state.computedColorBounds?.min ?? 0,
       maxValue: this._state.computedColorBounds?.max ?? 100,
     });
+    this._colorbar.setRamp(getCustomColorRamp(this._state.colorScheme));
 
     container.appendChild(this._colorbar.render());
     return container;
@@ -825,9 +843,7 @@ export class PanelBuilder {
     this._colorRangeContainer = container;
 
     // Set initial visibility based on current color scheme
-    const currentScheme = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
-    const showControl = currentScheme === 'elevation' || currentScheme === 'intensity';
-    container.style.display = showControl ? 'block' : 'none';
+    container.style.display = isGradientColorScheme(this._state.colorScheme) ? 'block' : 'none';
 
     // Get data bounds based on current color scheme
     const dataBounds = this._getDataBoundsForCurrentScheme();
@@ -851,12 +867,24 @@ export class PanelBuilder {
   }
 
   /**
-   * Updates the visibility of color-related controls based on color scheme.
-   * Shows colormap/colorbar/range for elevation and intensity.
-   * Shows classification legend for classification.
+   * Whether to show the colorbar: for gradient schemes, except a custom
+   * attribute that no loaded point cloud has, which has no range to show.
    */
-  private _updatePercentileVisibility(colorScheme: string): void {
-    const showColorControls = colorScheme === 'elevation' || colorScheme === 'intensity';
+  private _showColorbar(colorScheme: ColorScheme): boolean {
+    return (
+      isGradientColorScheme(colorScheme) &&
+      this._state.showColorbar &&
+      (typeof colorScheme === 'string' || this._state.computedColorBounds !== undefined)
+    );
+  }
+
+  /**
+   * Updates the visibility of color-related controls based on color scheme.
+   * Shows colormap/colorbar/range for gradient schemes (elevation, intensity
+   * or a custom attribute). Shows classification legend for classification.
+   */
+  private _updatePercentileVisibility(colorScheme: ColorScheme): void {
+    const showColorControls = isGradientColorScheme(colorScheme);
 
     // Show/hide colormap selector
     if (this._colormapGroup) {
@@ -865,7 +893,7 @@ export class PanelBuilder {
 
     // Show/hide colorbar
     if (this._colorbarContainer) {
-      this._colorbarContainer.style.display = showColorControls && this._state.showColorbar ? 'block' : 'none';
+      this._colorbarContainer.style.display = this._showColorbar(colorScheme) ? 'block' : 'none';
     }
 
     // Show/hide color range control and update bounds for the new scheme
@@ -873,7 +901,7 @@ export class PanelBuilder {
       this._colorRangeContainer.style.display = showColorControls ? 'block' : 'none';
     }
     if (this._colorRangeControl && showColorControls) {
-      // Update data bounds when switching between elevation and intensity
+      // Update data bounds when switching between gradient domains
       const bounds = this._getDataBoundsForCurrentScheme();
       this._colorRangeControl.setDataBounds(bounds);
     }
@@ -899,8 +927,7 @@ export class PanelBuilder {
     this._classificationLegendContainer = container;
 
     // Set initial visibility based on current color scheme
-    const currentScheme = typeof this._state.colorScheme === 'string' ? this._state.colorScheme : 'elevation';
-    container.style.display = currentScheme === 'classification' ? 'block' : 'none';
+    container.style.display = this._state.colorScheme === 'classification' ? 'block' : 'none';
 
     // Create the legend component
     this._classificationLegend = new ClassificationLegend({

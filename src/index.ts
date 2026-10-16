@@ -13,6 +13,9 @@ export {
   ColorSchemeProcessor,
   getClassificationName,
   getClassificationColor,
+  getAttributeValues,
+  isGradientColorScheme,
+  formatAttributeLabel,
   type ClassificationStyles,
 } from './lib/colorizers/ColorScheme';
 export { COLORMAPS, COLORMAP_NAMES, COLORMAP_LABELS, getColormap } from './lib/colorizers/Colormaps';
