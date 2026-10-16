@@ -95,6 +95,19 @@ export class ColorSchemeProcessor {
   private _warnedCategorical = false;
 
   /**
+   * Generates a color array for the point cloud based on the color scheme.
+   *
+   * @param data - Point cloud data
+   * @param scheme - Color scheme to apply
+   * @param options - Optional color generation options
+   * @returns Uint8Array of RGBA colors (length = pointCount * 4)
+   */
+  getColors(data: PointCloudData, scheme: ColorScheme, options: ColorOptions = {}): Uint8Array {
+    const result = this.getColorsWithBounds(data, scheme, options);
+    return result.colors;
+  }
+
+  /**
    * Generates a color array and returns the computed bounds.
    *
    * @param data - Point cloud data

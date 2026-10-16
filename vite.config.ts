@@ -32,12 +32,6 @@ export default defineConfig({
     },
   },
   assetsInclude: ['**/*.wasm'],
-  // maplibre-gl v6 loads its worker via a sibling file (maplibre-gl-worker.mjs)
-  // relative to import.meta.url. Pre-bundling moves it into .vite/deps without
-  // that file, so serve it straight from node_modules instead.
-  optimizeDeps: {
-    exclude: ['maplibre-gl'],
-  },
   build: {
     lib: {
       entry: {
