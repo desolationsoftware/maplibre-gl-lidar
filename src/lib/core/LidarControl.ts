@@ -42,7 +42,7 @@ function boundsEqual(a?: { min: number; max: number }, b?: { min: number; max: n
 /**
  * Default options for the LidarControl
  */
-const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode'> = {
+const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom' | 'terrainSourceId'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom' | 'terrainSourceId'> = {
   collapsed: true,
   position: 'top-right',
   title: 'LiDAR Viewer',
@@ -51,6 +51,8 @@ const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'co
   theme: 'auto',
   className: '',
   pointSize: 2,
+  pointSizeReferenceZoom: undefined, // Constant pixel size by default
+  minPointSizeMeters: 0,
   opacity: 1.0,
   colorScheme: 'elevation',
   colorAttributes: [],
@@ -73,6 +75,7 @@ const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'co
   streamingViewportDebounceMs: 150,
   terrainEnabled: false,
   terrainExaggeration: 1.0,
+  terrainSourceId: undefined, // Add AWS Terrain Tiles source
   shareUrl: true,
   restoreFromUrl: true,
   sampleData: [],
@@ -122,7 +125,7 @@ export class LidarControl implements IControl {
   private _mapContainer?: HTMLElement;
   private _container?: HTMLElement;
   private _panel?: HTMLElement;
-  private _options: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode'>;
+  private _options: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom' | 'terrainSourceId'>> & Pick<LidarControlOptions, 'pickInfoFields' | 'copcLoadingMode' | 'pointSizeReferenceZoom' | 'terrainSourceId'>;
   private _state: LidarState;
   private _eventHandlers: EventHandlersMap = new globalThis.Map();
 
@@ -229,6 +232,8 @@ export class LidarControl implements IControl {
     // Initialize point cloud manager
     this._pointCloudManager = new PointCloudManager(this._deckOverlay, {
       pointSize: this._state.pointSize,
+      pointSizeReferenceZoom: this._options.pointSizeReferenceZoom,
+      minPointSizeMeters: this._options.minPointSizeMeters,
       opacity: this._state.opacity,
       colorScheme: this._state.colorScheme,
       usePercentile: this._state.usePercentile,
@@ -1918,7 +1923,7 @@ export class LidarControl implements IControl {
   /**
    * Sets the point size.
    *
-   * @param size - Point size in pixels
+   * @param size - Point size in pixels (at `pointSizeReferenceZoom` when set)
    */
   setPointSize(size: number): void {
     this._state.pointSize = size;
@@ -2182,8 +2187,10 @@ export class LidarControl implements IControl {
     this._state.terrainEnabled = enabled;
 
     if (enabled) {
+      const sourceId = this._options.terrainSourceId ?? 'terrain-dem';
+
       // Add terrain source if not present (using AWS Terrain Tiles - free)
-      if (!this._map.getSource('terrain-dem')) {
+      if (!this._options.terrainSourceId && !this._map.getSource(sourceId)) {
         this._map.addSource('terrain-dem', {
           type: 'raster-dem',
           tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
@@ -2195,7 +2202,7 @@ export class LidarControl implements IControl {
 
       // Enable terrain
       this._map.setTerrain({
-        source: 'terrain-dem',
+        source: sourceId,
         exaggeration: this._options.terrainExaggeration ?? 1.0,
       });
     } else {
@@ -2533,6 +2540,7 @@ export class LidarControl implements IControl {
         sampleData: this._options.sampleData,
         sampleDataLabel: this._options.sampleDataLabel,
         colorAttributes: this._options.colorAttributes,
+        pointSizeReferenceZoom: this._options.pointSizeReferenceZoom,
       }
     );
 
