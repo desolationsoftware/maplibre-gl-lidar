@@ -524,11 +524,11 @@ export class PanelBuilder {
       return;
     }
 
-    const attributes = [ ...this._state.availableAttributes ];
+    const attributes = new Set(this._state.availableAttributes);
     if (typeof this._state.colorScheme !== 'string') {
-      attributes.push(this._state.colorScheme.attribute);
+      attributes.add(this._state.colorScheme.attribute);
     }
-    const names = attributes.sort();
+    const names = [ ...attributes ].sort();
     const key = names.join('\n');
     if (key === this._colorSelectAttributes) {
       return;
