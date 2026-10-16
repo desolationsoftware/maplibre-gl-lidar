@@ -214,10 +214,7 @@ export class ColorSchemeProcessor {
     }
 
     // Extract Z values
-    const zValues = new Float32Array(data.pointCount);
-    for (let i = 0; i < data.pointCount; i++) {
-      zValues[i] = data.positions[i * 3 + 2] ?? 0;
-    }
+    const zValues = getElevationValues(data);
 
     // Use the header bounds rather than scanning every Z value
     const dataBounds = {
@@ -530,6 +527,44 @@ export function formatAttributeLabel(name: string): string {
 export function getAttributeValues(data: PointCloudData, attribute: string): AttributeArray | undefined {
   const source = data.extraAttributes?.[attribute];
   return source && source.length > 0 ? source : undefined;
+}
+
+/**
+ * Extracts each point's Z (elevation) value.
+ *
+ * @param data - Point cloud data
+ * @returns Per-point Z values
+ */
+export function getElevationValues(data: PointCloudData): Float32Array {
+  const values = new Float32Array(data.pointCount);
+  for (let i = 0; i < data.pointCount; i++) {
+    values[i] = data.positions[i * 3 + 2] ?? 0;
+  }
+  return values;
+}
+
+/**
+ * Resolves the per-point values a color scheme colors by, mirroring each
+ * colorizer's fallbacks so a range filter matches what is rendered.
+ *
+ * @param data - Point cloud data
+ * @param scheme - Color scheme to resolve values for
+ * @returns Per-point values, or undefined when the scheme has no continuous domain
+ */
+export function getSchemeFilterValues(data: PointCloudData, scheme: ColorScheme): AttributeArray | undefined {
+  if (typeof scheme !== 'string') {
+    return getAttributeValues(data, scheme.attribute);
+  }
+  switch (scheme) {
+    case 'classification':
+    case 'rgb':
+      return undefined;
+    case 'intensity':
+      return data.hasIntensity && data.intensities ? data.intensities : getElevationValues(data);
+    case 'elevation':
+    default:
+      return getElevationValues(data);
+  }
 }
 
 /**

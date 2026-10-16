@@ -5,7 +5,7 @@ import type { DeckOverlay } from '../core/DeckOverlay';
 import type { PointCloudData } from '../loaders/types';
 import type { ColormapName, ColorRangeConfig, ColorScheme, PointCloudBounds } from '../core/types';
 import type { PickedPointInfo, PointCloudLayerOptions } from './types';
-import { ColorSchemeProcessor } from '../colorizers/ColorScheme';
+import { ColorSchemeProcessor, getSchemeFilterValues } from '../colorizers/ColorScheme';
 
 // Web Mercator ground resolution at zoom 0 (meters/pixel at the equator) for a 512px tile.
 const WEB_MERCATOR_METERS_PER_PIXEL_AT_ZOOM_0 = 78271.51696402048;
@@ -67,6 +67,7 @@ export class PointCloudManager {
       colormap: options.colormap ?? 'viridis',
       colorRange: options.colorRange,
       elevationRange: options.elevationRange ?? null,
+      filterRange: options.filterRange ?? null,
       pickable: options.pickable ?? false,
       zOffset: options.zOffset ?? 0,
       classificationStyles: options.classificationStyles,
@@ -365,6 +366,16 @@ export class PointCloudManager {
   }
 
   /**
+   * Sets the range filter, excluding points whose value for the current
+   * color scheme falls outside [min, max].
+   *
+   * @param range - [min, max] or null to disable
+   */
+  setFilterRange(range: [number, number] | null): void {
+    this.updateStyle({ filterRange: range });
+  }
+
+  /**
    * Sets whether points are pickable (enables hover/click interactions).
    *
    * @param pickable - Whether points should be pickable
@@ -584,7 +595,7 @@ export class PointCloudManager {
    * Creates a deck.gl layer for a point cloud.
    * Chunks large point clouds into multiple layers to avoid WebGL buffer limits.
    * Uses coordinateOrigin + LNGLAT_OFFSETS to maintain Float32 precision.
-   * Applies elevation filter if set.
+   * Applies the elevation filter and color scheme range filter if set.
    */
   private _createLayer(id: string): void {
     const pc = this._pointClouds.get(id);
@@ -592,6 +603,7 @@ export class PointCloudManager {
 
     const { data, colors, coordinateOrigin, visible, opacityOverride } = pc;
     const elevationRange = this._options.elevationRange;
+    const filterRange = this._options.filterRange ?? null;
     const zOffset = this._options.zOffset ?? 0;
     const layerOpacity = opacityOverride ?? this._options.opacity;
 
@@ -606,15 +618,22 @@ export class PointCloudManager {
       return;
     }
 
-    // Build filtered indices list
+    // Build filtered indices list. Schemes without a continuous domain have
+    // no filter values, so the range filter passes every point.
+    const filterValues = filterRange ? getSchemeFilterValues(data, this._options.colorScheme) : undefined;
     const filteredIndices: number[] = [];
 
     for (let i = 0; i < data.pointCount; i++) {
       const elevation = data.positions[i * 3 + 2];
-      if (elevationRange === null ||
-          (elevation >= elevationRange[0] && elevation <= elevationRange[1])) {
-        filteredIndices.push(i);
+      if (elevationRange !== null &&
+          (elevation < elevationRange[0] || elevation > elevationRange[1])) {
+        continue;
       }
+      if (filterRange !== null && filterValues &&
+          (filterValues[i] < filterRange[0] || filterValues[i] > filterRange[1])) {
+        continue;
+      }
+      filteredIndices.push(i);
     }
 
     // If no points pass the filter, don't create any layers
@@ -707,6 +726,7 @@ export class PointCloudManager {
 
       // Create a unique data fingerprint to force deck.gl to update
       const elevationKey = elevationRange ? `${elevationRange[0]}-${elevationRange[1]}` : 'none';
+      const filterKey = filterRange ? `${filterRange[0]}-${filterRange[1]}` : 'none';
       const zOffsetKey = zOffset;
 
       const layer = new PointCloudLayer({
@@ -730,8 +750,8 @@ export class PointCloudManager {
         highlightColor: [255, 255, 0, 200],
         // Force update when these values change
         updateTriggers: {
-          getPosition: [elevationKey, zOffsetKey, chunkSize],
-          getColor: [elevationKey, chunkSize],
+          getPosition: [elevationKey, filterKey, zOffsetKey, chunkSize],
+          getColor: [elevationKey, filterKey, chunkSize],
         },
       });
 

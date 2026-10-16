@@ -26,6 +26,8 @@ const FLAT_SHARE_PARAMS = [
   'amax',
   'emin',
   'emax',
+  'fmin',
+  'fmax',
   'pick',
   'zoff',
   'zoffEnabled',
@@ -47,6 +49,8 @@ export interface LidarShareVisualization {
   colormap: ColormapName;
   colorRange: ColorRangeConfig;
   elevationRange: [number, number] | null;
+  /** Absent in payloads created before the range filter existed */
+  filterRange?: [number, number] | null;
   pickable: boolean;
   zOffsetEnabled: boolean;
   zOffset: number;
@@ -116,7 +120,7 @@ function isMapState(value: unknown): value is LidarShareMapState {
   );
 }
 
-function isElevationRange(value: unknown): value is [number, number] | null {
+function isNumberRange(value: unknown): value is [number, number] | null {
   return (
     value === null ||
     (Array.isArray(value) &&
@@ -144,7 +148,8 @@ function isVisualization(value: unknown): value is LidarShareVisualization {
     value.colorScheme !== undefined &&
     typeof value.colormap === 'string' &&
     isColorRange(value.colorRange) &&
-    isElevationRange(value.elevationRange) &&
+    isNumberRange(value.elevationRange) &&
+    (value.filterRange === undefined || isNumberRange(value.filterRange)) &&
     typeof value.pickable === 'boolean' &&
     typeof value.zOffsetEnabled === 'boolean' &&
     isNumber(value.zOffset) &&
@@ -191,6 +196,7 @@ export function createLidarSharePayload(
       colormap: state.colormap,
       colorRange: state.colorRange,
       elevationRange: state.elevationRange,
+      filterRange: state.filterRange,
       pickable: state.pickable,
       zOffsetEnabled: state.zOffsetEnabled,
       zOffset: state.zOffset,
@@ -270,6 +276,10 @@ export function createLidarShareUrl(currentUrl: string, payload: LidarSharePaylo
   if (visualization.elevationRange) {
     url.searchParams.set('emin', formatQueryNumber(visualization.elevationRange[0]));
     url.searchParams.set('emax', formatQueryNumber(visualization.elevationRange[1]));
+  }
+  if (visualization.filterRange) {
+    url.searchParams.set('fmin', formatQueryNumber(visualization.filterRange[0]));
+    url.searchParams.set('fmax', formatQueryNumber(visualization.filterRange[1]));
   }
   url.searchParams.set('pick', formatQueryBoolean(visualization.pickable));
   url.searchParams.set('zoffEnabled', formatQueryBoolean(visualization.zOffsetEnabled));
@@ -361,6 +371,8 @@ function parseFlatLidarSharePayload(params: URLSearchParams): LidarSharePayload 
   const absoluteMax = parseQueryNumber(params.get('amax'));
   const elevationMin = parseQueryNumber(params.get('emin'));
   const elevationMax = parseQueryNumber(params.get('emax'));
+  const filterMin = parseQueryNumber(params.get('fmin'));
+  const filterMax = parseQueryNumber(params.get('fmax'));
   const zOffset = parseQueryNumber(params.get('zoff')) ?? 0;
   const hiddenClassifications = (params.get('hidden') ?? '')
     .split(',')
@@ -395,6 +407,7 @@ function parseFlatLidarSharePayload(params: URLSearchParams): LidarSharePayload 
         elevationMin !== undefined && elevationMax !== undefined
           ? [elevationMin, elevationMax]
           : null,
+      filterRange: filterMin !== undefined && filterMax !== undefined ? [filterMin, filterMax] : null,
       pickable: parseQueryBoolean(params.get('pick'), false),
       zOffsetEnabled: parseQueryBoolean(params.get('zoffEnabled'), false),
       zOffset,

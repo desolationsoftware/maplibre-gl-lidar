@@ -5,7 +5,7 @@ import { DualRangeSlider } from './DualRangeSlider';
 import { ClassificationLegend } from './ClassificationLegend';
 import { Colorbar } from './Colorbar';
 import { PercentileRangeControl } from './PercentileRangeControl';
-import { formatNumber } from '../utils/helpers';
+import { formatNumber, getAdaptiveRangeStep } from '../utils/helpers';
 import { COLORMAP_LABELS, COLORMAP_NAMES } from '../colorizers/Colormaps';
 import { colorSchemeToDomainKey, domainKeyToColorScheme, formatAttributeLabel, getCustomColorRamp, isGradientColorScheme } from '../colorizers/ColorScheme';
 
@@ -22,6 +22,7 @@ export interface PanelBuilderCallbacks {
   onColorRangeChange: (config: ColorRangeConfig) => void;
   onUsePercentileChange: (usePercentile: boolean) => void;
   onElevationRangeChange: (range: [number, number] | null) => void;
+  onFilterRangeChange: (range: [ number, number ] | null) => void;
   onPickableChange: (pickable: boolean) => void;
   onZOffsetEnabledChange: (enabled: boolean) => void;
   onZOffsetChange: (offset: number) => void;
@@ -66,6 +67,10 @@ export class PanelBuilder {
   private _pickableCheckbox?: HTMLInputElement;
   private _elevationSlider?: DualRangeSlider;
   private _elevationCheckbox?: HTMLInputElement;
+  private _filterSlider?: DualRangeSlider;
+  private _filterCheckbox?: HTMLInputElement;
+  private _filterSliderContainer?: HTMLElement;
+  private _filterRangeContainer?: HTMLElement;
   private _zOffsetCheckbox?: HTMLInputElement;
   private _zOffsetSlider?: RangeSlider;
   private _zOffsetSliderContainer?: HTMLElement;
@@ -241,6 +246,33 @@ export class PanelBuilder {
       // If filter is not active, reset range to full bounds
       if (!this._elevationCheckbox?.checked) {
         this._elevationSlider.setRange(bounds.min, bounds.max);
+      }
+    }
+
+    if (this._filterRangeContainer) {
+      this._filterRangeContainer.style.display = this._hasRangeFilter(state.colorScheme) ? 'block' : 'none';
+    }
+
+    // Reflect external range filter changes (like share URLs)
+    if (this._filterCheckbox) {
+      const hasFilter = state.filterRange !== null;
+      if (this._filterCheckbox.checked !== hasFilter) {
+        this._filterCheckbox.checked = hasFilter;
+        if (this._filterSliderContainer) {
+          this._filterSliderContainer.style.display = hasFilter ? 'block' : 'none';
+        }
+      }
+    }
+
+    // Keep range filter bounds on the current color scheme's domain
+    if (this._filterSlider && state.pointClouds.length > 0) {
+      const bounds = this._getDataBoundsForCurrentScheme();
+      this._filterSlider.setStep(getAdaptiveRangeStep(bounds));
+      this._filterSlider.setBounds(bounds.min, bounds.max);
+      if (state.filterRange) {
+        this._filterSlider.setRange(state.filterRange[0], state.filterRange[1]);
+      } else {
+        this._filterSlider.setRange(bounds.min, bounds.max);
       }
     }
 
@@ -514,6 +546,9 @@ export class PanelBuilder {
     // Elevation filter (collapsible)
     section.appendChild(this._buildElevationFilter());
 
+    // Range filter on the "Color By" attribute (collapsible)
+    section.appendChild(this._buildFilterRangeControl());
+
     // Z offset control (collapsible)
     section.appendChild(this._buildZOffsetControl());
 
@@ -615,6 +650,92 @@ export class PanelBuilder {
         }
       } else {
         this._callbacks.onElevationRangeChange(null);
+      }
+    });
+
+    return group;
+  }
+
+  /**
+   * Whether a color scheme gets the range filter: gradient schemes other than
+   * elevation, which the elevation filter already covers.
+   */
+  private _hasRangeFilter(colorScheme: ColorScheme): boolean {
+    return isGradientColorScheme(colorScheme) && colorScheme !== 'elevation';
+  }
+
+  /**
+   * Builds the range filter controls (checkbox + dual slider), which exclude
+   * points outside the range for the current "Color By" attribute.
+   */
+  private _buildFilterRangeControl(): HTMLElement {
+    const group = document.createElement('div');
+    group.className = 'lidar-control-group';
+    group.style.display = this._hasRangeFilter(this._state.colorScheme) ? 'block' : 'none';
+    this._filterRangeContainer = group;
+
+    // Checkbox row
+    const labelRow = document.createElement('div');
+    labelRow.className = 'lidar-control-label-row';
+    labelRow.style.cursor = 'pointer';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.id = 'lidar-filter-range-checkbox';
+    checkbox.checked = this._state.filterRange !== null;
+    checkbox.style.marginRight = '6px';
+    this._filterCheckbox = checkbox;
+
+    const label = document.createElement('label');
+    label.className = 'lidar-control-label';
+    label.htmlFor = 'lidar-filter-range-checkbox';
+    label.style.display = 'inline';
+    label.style.cursor = 'pointer';
+    label.textContent = 'Range Filter';
+
+    labelRow.appendChild(checkbox);
+    labelRow.appendChild(label);
+    group.appendChild(labelRow);
+
+    // Slider container (hidden until enabled)
+    const sliderContainer = document.createElement('div');
+    sliderContainer.style.display = checkbox.checked ? 'block' : 'none';
+    sliderContainer.style.marginTop = '8px';
+    this._filterSliderContainer = sliderContainer;
+
+    // The default formatter scales decimals to the step, kept in sync via setStep()
+    const bounds = this._getDataBoundsForCurrentScheme();
+    this._filterSlider = new DualRangeSlider({
+      label: 'Range',
+      min: bounds.min,
+      max: bounds.max,
+      step: getAdaptiveRangeStep(bounds),
+      valueLow: this._state.filterRange?.[0] ?? bounds.min,
+      valueHigh: this._state.filterRange?.[1] ?? bounds.max,
+      onChange: (low, high) => {
+        if (checkbox.checked) {
+          this._callbacks.onFilterRangeChange([ low, high ]);
+        }
+      },
+    });
+
+    sliderContainer.appendChild(this._filterSlider.render());
+    group.appendChild(sliderContainer);
+
+    // Toggle visibility and filter
+    checkbox.addEventListener('change', () => {
+      sliderContainer.style.display = checkbox.checked ? 'block' : 'none';
+      if (checkbox.checked) {
+        const newBounds = this._getDataBoundsForCurrentScheme();
+        this._filterSlider?.setStep(getAdaptiveRangeStep(newBounds));
+        this._filterSlider?.setBounds(newBounds.min, newBounds.max);
+        this._filterSlider?.setRange(newBounds.min, newBounds.max);
+        const range = this._filterSlider?.getRange();
+        if (range) {
+          this._callbacks.onFilterRangeChange(range);
+        }
+      } else {
+        this._callbacks.onFilterRangeChange(null);
       }
     });
 

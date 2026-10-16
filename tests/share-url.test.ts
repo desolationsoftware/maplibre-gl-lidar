@@ -66,6 +66,7 @@ function createState(overrides: Partial<LidarState> = {}): LidarState {
     showColorbar: true,
     usePercentile: true,
     elevationRange: [20, 80],
+    filterRange: null,
     pointBudget: 1000000,
     pickable: true,
     loading: false,
