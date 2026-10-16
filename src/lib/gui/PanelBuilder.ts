@@ -45,6 +45,7 @@ export class PanelBuilder {
   private _sampleData: LidarSampleDataset[];
   private _sampleDataLabel: string;
   private _colorAttributes: string[];
+  private _pointSizeReferenceZoom?: number;
 
   // UI component references
   private _fileInput?: FileInput;
@@ -78,13 +79,14 @@ export class PanelBuilder {
   constructor(
     callbacks: PanelBuilderCallbacks,
     initialState: LidarState,
-    options?: { sampleData?: LidarSampleDataset[]; sampleDataLabel?: string; colorAttributes?: string[] },
+    options?: { sampleData?: LidarSampleDataset[]; sampleDataLabel?: string; colorAttributes?: string[]; pointSizeReferenceZoom?: number; },
   ) {
     this._callbacks = callbacks;
     this._state = initialState;
     this._sampleData = options?.sampleData ?? [];
     this._sampleDataLabel = options?.sampleDataLabel ?? 'Load sample data...';
     this._colorAttributes = options?.colorAttributes ?? [];
+    this._pointSizeReferenceZoom = options?.pointSizeReferenceZoom;
   }
 
   /**
@@ -480,7 +482,10 @@ export class PanelBuilder {
 
     // Point size slider
     this._pointSizeSlider = new RangeSlider({
-      label: 'Point Size',
+      label:
+        this._pointSizeReferenceZoom === undefined
+          ? 'Point Size'
+          : `Point Size (at z${this._pointSizeReferenceZoom})`,
       min: 1,
       max: 10,
       step: 0.5,

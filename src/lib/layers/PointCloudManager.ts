@@ -1,11 +1,29 @@
 import { PointCloudLayer } from '@deck.gl/layers';
-import { COORDINATE_SYSTEM } from '@deck.gl/core';
 import type { PickingInfo } from '@deck.gl/core';
+import { COORDINATE_SYSTEM } from '@deck.gl/core';
 import type { DeckOverlay } from '../core/DeckOverlay';
 import type { PointCloudData } from '../loaders/types';
-import type { ColorScheme, PointCloudBounds, ColormapName, ColorRangeConfig } from '../core/types';
-import type { PointCloudLayerOptions, PickedPointInfo } from './types';
+import type { ColormapName, ColorRangeConfig, ColorScheme, PointCloudBounds } from '../core/types';
+import type { PickedPointInfo, PointCloudLayerOptions } from './types';
 import { ColorSchemeProcessor } from '../colorizers/ColorScheme';
+
+// Web Mercator ground resolution at zoom 0 (meters/pixel at the equator) for a 512px tile.
+const WEB_MERCATOR_METERS_PER_PIXEL_AT_ZOOM_0 = 78271.51696402048;
+
+/**
+ * Converts a pixel size at `referenceZoom` into meters.
+ */
+function pointSizeMeters(
+  sizePixels: number,
+  referenceZoom: number,
+  latitudeDeg: number,
+  minMeters: number,
+): number {
+  const metersPerPixel =
+    (WEB_MERCATOR_METERS_PER_PIXEL_AT_ZOOM_0 * Math.cos((latitudeDeg * Math.PI) / 180)) /
+    2 ** referenceZoom;
+  return Math.max(sizePixels * metersPerPixel, minMeters);
+}
 
 /**
  * Internal point cloud data with computed colors
@@ -41,6 +59,8 @@ export class PointCloudManager {
     this._colorProcessor = new ColorSchemeProcessor();
     this._options = {
       pointSize: options.pointSize ?? 2,
+      pointSizeReferenceZoom: options.pointSizeReferenceZoom,
+      minPointSizeMeters: options.minPointSizeMeters ?? 0,
       opacity: options.opacity ?? 1.0,
       colorScheme: options.colorScheme ?? 'elevation',
       usePercentile: options.usePercentile ?? true,
@@ -277,7 +297,7 @@ export class PointCloudManager {
   /**
    * Sets the point size.
    *
-   * @param size - Point size in pixels
+   * @param size - Point size in pixels (at `pointSizeReferenceZoom` when set)
    */
   setPointSize(size: number): void {
     this.updateStyle({ pointSize: size });
@@ -700,8 +720,7 @@ export class PointCloudManager {
             getColor: { value: chunkColors, size: 4 },
           },
         },
-        pointSize: this._options.pointSize,
-        sizeUnits: 'pixels',
+        ...this._getPointSizeProps(coordinateOrigin[1]),
         opacity: layerOpacity,
         getNormal: [0, 0, 1],
         pickable: this._options.pickable,
@@ -720,6 +739,20 @@ export class PointCloudManager {
     }
 
     this._pointClouds.set(id, { ...pc, chunkCount: numChunks });
+  }
+
+  /**
+   * Gets the deck.gl size props for a point cloud at the given latitude.
+   */
+  private _getPointSizeProps(latitudeDeg: number): { pointSize: number; sizeUnits: 'pixels' | 'meters' } {
+    const { pointSize, pointSizeReferenceZoom, minPointSizeMeters } = this._options;
+    if (pointSizeReferenceZoom === undefined) {
+      return { pointSize, sizeUnits: 'pixels' };
+    }
+    return {
+      pointSize: pointSizeMeters(pointSize, pointSizeReferenceZoom, latitudeDeg, minPointSizeMeters ?? 0),
+      sizeUnits: 'meters',
+    };
   }
 
   /**
