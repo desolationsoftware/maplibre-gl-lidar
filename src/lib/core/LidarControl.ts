@@ -149,7 +149,6 @@ export class LidarControl implements IControl {
   private _viewportManagers: Map<string, ViewportManager> = new Map();
   private _copcViewportRequestIds: Map<string, number> = new Map();
   private _eptViewportRequestIds: Map<string, number> = new Map();
-  private _eptLastViewport: Map<string, ViewportInfo> = new Map();
 
   // Track whether the user has explicitly set zOffset (to skip autoZOffset)
   private _manualZOffset = false;
@@ -1803,7 +1802,6 @@ export class LidarControl implements IControl {
       }
       this._eptStreamingLoaders.clear();
       this._eptViewportRequestIds.clear();
-      this._eptLastViewport.clear();
 
       // Remove all streaming point clouds from manager
       for (const streamingId of streamingIds) {
