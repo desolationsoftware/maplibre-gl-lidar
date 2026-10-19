@@ -1,23 +1,11 @@
 import { load } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import proj4 from 'proj4';
-import type {
-  NodeKey,
-  StreamingLoaderOptions,
-  ViewportInfo,
-  StreamingProgressEvent,
-  StreamingLoaderEvent,
-  StreamingLoaderEventHandler,
-} from './streaming-types';
-import type {
-  EptMetadata,
-  EptDimension,
-  EptHierarchy,
-  EptCachedNode,
-  ParsedDimension,
-} from './ept-types';
-import type { PointCloudData, ExtraPointAttributes, AttributeArray, PointNodeRange } from './types';
+import type { NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
+import type { EptCachedNode, EptDimension, EptHierarchy, EptMetadata, ParsedDimension } from './ept-types';
+import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
+import { compareNodePriority, nodeLoadPriority } from '../utils/helpers';
 
 /**
  * Configuration for attribute storage types
@@ -188,7 +176,7 @@ const DEFAULT_OPTIONS: Required<StreamingLoaderOptions> = {
 
 /**
  * Streams Entwine Point Tile (EPT) data on-demand based on viewport.
- * Implements center-first priority loading and respects point budget.
+ * Loads coarse-to-fine, center-first within each depth, and respects point budget.
  *
  * EPT format uses:
  * - ept.json for metadata
@@ -232,6 +220,7 @@ export class EptStreamingLoader {
   private _transformer: ((coord: [number, number]) => [number, number]) | null = null;
   private _verticalUnitFactor: number = 1.0;
   private _needsTransform: boolean = false;
+  private _spacingInMeters: number = 0;
 
   // Point format info
   private _hasColor: boolean = false;
@@ -373,11 +362,31 @@ export class EptStreamingLoader {
     const cubeSize = this._metadata.bounds[3] - this._metadata.bounds[0];
     const spacing = cubeSize / this._metadata.span;
 
+
+    // Convert spacing to meters. When the source CRS is geographic (lng/lat
+    // in degrees), info.spacing is in degrees and must be converted before it
+    // can be compared to screen ground resolution in meters. We detect a
+    // geographic source as one where no projection transformation was set up
+    // and the header bounds fall within valid lng/lat ranges.
+    const isGeographic =
+      !this._needsTransform &&
+      Math.abs(minX) <= 180 &&
+      Math.abs(maxX) <= 180 &&
+      Math.abs(minY) <= 90 &&
+      Math.abs(maxY) <= 90;
+    if (isGeographic) {
+      const centerLat = (this._bounds.minY + this._bounds.maxY) / 2;
+      const metersPerDegreeLng = 111320 * Math.cos((centerLat * Math.PI) / 180);
+      this._spacingInMeters = spacing * Math.max(metersPerDegreeLng, 1);
+    } else {
+      this._spacingInMeters = spacing;
+    }
+
     return {
       bounds: this._bounds,
       totalPoints: this._totalPointsInFile,
       hasRGB: this._hasColor,
-      spacing,
+      spacing: this._spacingInMeters,
     };
   }
 
@@ -470,12 +479,11 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Gets the octree spacing value.
+   * Gets the octree spacing value in meters (useful for ViewportManager).
+   * Always returned in meters even when the source CRS is geographic.
    */
   getSpacing(): number {
-    if (!this._metadata) return 1;
-    const cubeSize = this._metadata.bounds[3] - this._metadata.bounds[0];
-    return cubeSize / this._metadata.span;
+    return this._spacingInMeters;
   }
 
   /**
@@ -772,14 +780,15 @@ export class EptStreamingLoader {
 
       // Add to load list if not already loaded/loading
       if (node.state !== 'loaded' && node.state !== 'loading') {
+        // Coarse-to-fine, then nearest-first within a depth
         const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-        node.priority = distPriority - (depth * 0.0001);
+        node.priority = nodeLoadPriority(depth, distPriority);
         nodesToLoad.push(node);
       }
     }
 
-    // Sort by priority (center-first)
-    nodesToLoad.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
+    // Sort by priority (coarse-to-fine, then center-first)
+    nodesToLoad.sort(compareNodePriority);
 
     return nodesToLoad;
   }
@@ -794,7 +803,91 @@ export class EptStreamingLoader {
     if (this._loadingQueue.find((n) => n.key === node.key)) return;
 
     this._loadingQueue.push(node);
-    this._loadingQueue.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
+    this._loadingQueue.sort(compareNodePriority);
+  }
+
+  /**
+   * Evicts loaded nodes outside the current viewport and compacts point buffers.
+   * Hierarchy metadata is kept so evicted nodes can be loaded again later.
+   *
+   * @param viewport - Current viewport information
+   * @returns True if eviction completed, or false if active requests are still writing buffers
+   */
+  evictLoadedNodesOutsideViewport(viewport: ViewportInfo): boolean {
+    if (this._paused || this._activeRequests > 0 || this._isResetting) {
+      return false;
+    }
+
+    const loadedNodes = Array.from(this._nodeCache.values()).filter(
+      (node) => node.state === 'loaded' && node.bufferStartIndex !== undefined,
+    );
+    if (loadedNodes.length === 0) {
+      return true;
+    }
+
+    const keepNodes = loadedNodes
+      .filter((node) => this._boundsIntersectsViewport(node.boundsWgs84, viewport))
+      .sort((a, b) => a.bufferStartIndex! - b.bufferStartIndex!);
+    const keepNodeKeys = new Set(keepNodes.map((node) => node.key));
+
+    let nextStart = 0;
+    for (const node of keepNodes) {
+      const oldStart = node.bufferStartIndex!;
+      if (oldStart !== nextStart) {
+        this._copyNodeBufferRange(oldStart, nextStart, node.pointCount);
+      }
+      node.bufferStartIndex = nextStart;
+      nextStart += node.pointCount;
+    }
+
+    let evictedCount = 0;
+    for (const node of this._nodeCache.values()) {
+      if (node.state === 'loaded' && keepNodeKeys.has(node.key)) {
+        continue;
+      }
+      if (node.state !== 'loaded' && node.state !== 'error') {
+        continue;
+      }
+
+      node.state = 'pending';
+      node.bufferStartIndex = undefined;
+      node.error = undefined;
+      node.retryCount = undefined;
+      node.lastFailedAt = undefined;
+      node.priority = undefined;
+      evictedCount++;
+    }
+
+    const pointsChanged = nextStart !== this._totalLoadedPoints;
+    if (evictedCount > 0 || pointsChanged) {
+      this._totalLoadedPoints = nextStart;
+      this._totalLoadedNodes = keepNodes.length;
+      this._emit('progress', this._getProgressEvent());
+      this._scheduleLayerUpdate();
+    }
+
+    return true;
+  }
+
+  /**
+   * Copies a node's point data from one buffer range to another.
+   *
+   * @param fromStart - Source point index
+   * @param toStart - Destination point index
+   * @param pointCount - Number of points to copy
+   */
+  private _copyNodeBufferRange(fromStart: number, toStart: number, pointCount: number): void {
+    this._positions!.copyWithin(toStart * 3, fromStart * 3, (fromStart + pointCount) * 3);
+    this._intensities!.copyWithin(toStart, fromStart, fromStart + pointCount);
+    this._classifications!.copyWithin(toStart, fromStart, fromStart + pointCount);
+
+    if (this._colors) {
+      this._colors.copyWithin(toStart * 4, fromStart * 4, (fromStart + pointCount) * 4);
+    }
+
+    for (const arr of Object.values(this._extraAttributes)) {
+      arr.copyWithin(toStart, fromStart, fromStart + pointCount);
+    }
   }
 
   /**
@@ -1452,10 +1545,10 @@ export class EptStreamingLoader {
     for (const node of this._loadingQueue) {
       const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
       const depth = node.keyArray[0];
-      node.priority = distPriority - (depth * 0.0001);
+      node.priority = nodeLoadPriority(depth, distPriority);
     }
 
-    this._loadingQueue.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
+    this._loadingQueue.sort(compareNodePriority);
   }
 
   /**
