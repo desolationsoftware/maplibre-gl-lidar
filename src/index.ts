@@ -5,6 +5,7 @@ import './lib/styles/lidar-control.css';
 export { LidarControl } from './lib/core/LidarControl';
 export { DECK_CANVAS_CLASS, DeckOverlay } from './lib/core/DeckOverlay';
 export { ViewportManager } from './lib/core/ViewportManager';
+export { TilePointCloudSource } from './lib/core/TilePointCloudSource';
 export { PointCloudLoader } from './lib/loaders/PointCloudLoader';
 export { CopcStreamingLoader } from './lib/loaders/CopcStreamingLoader';
 export { EptStreamingLoader } from './lib/loaders/EptStreamingLoader';
@@ -45,6 +46,7 @@ export type {
   ColorSchemeType,
   ColorSchemeConfig,
   CopcLoadingMode,
+  PointCloudLoadOptions,
   ColormapName,
   ColorRangeConfig,
   // Metadata types
@@ -83,6 +85,13 @@ export type {
   EptHierarchy,
   EptCachedNode,
 } from './lib/loaders/ept-types';
+
+export type {
+  TilePointCloudHost,
+  TilePointCloudSourceOptions,
+} from './lib/core/TilePointCloudSource';
+export { TileId } from './lib/utils/tileMath';
+export type { LngLatBounds, TileRange } from './lib/utils/tileMath';
 
 export type {
   PointCloudLayerOptions,

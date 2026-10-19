@@ -17,7 +17,7 @@ import type {
 } from './streaming-types';
 import type { PointCloudData, ExtraPointAttributes, AttributeArray, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
-import { compareNodePriority, nodeLoadPriority } from '../utils/helpers';
+import { compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
 
 /**
  * Source type for streaming loader - can be URL, File, or ArrayBuffer
@@ -575,14 +575,14 @@ export class CopcStreamingLoader {
   ): boolean {
     const [west, south, east, north] = viewport.bounds;
 
-    // Add 20% buffer around viewport to catch edge/corner nodes
+    // Add a buffer around viewport to catch edge/corner nodes
     // This helps with:
     // 1. Tilted views where getBounds() underestimates visible area
     // 2. Nodes at the edge that might be partially visible
     const width = east - west;
     const height = north - south;
-    const bufferX = width * 0.2;
-    const bufferY = height * 0.2;
+    const bufferX = width * VIEWPORT_BUFFER_FACTOR;
+    const bufferY = height * VIEWPORT_BUFFER_FACTOR;
 
     const bufferedWest = west - bufferX;
     const bufferedEast = east + bufferX;
