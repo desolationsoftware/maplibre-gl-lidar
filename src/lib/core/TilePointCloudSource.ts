@@ -138,7 +138,6 @@ export class TilePointCloudSource {
       return;
     }
 
-    console.log('UPDATE PASS');
     // Same buffer the loaders keep nodes within, so a tile isn't dropped while its nodes are still wanted.
     const range = getTileRangeForBounds(
       extendBoundsOutwardByFactor(viewport.bounds, VIEWPORT_BUFFER_FACTOR),
@@ -210,11 +209,6 @@ export class TilePointCloudSource {
     for (const tile of enumerateTileRange(loadRange, viewport.center, this._options.tileZoom)) {
       const key = tile.key;
       if (this._tiles.has(key) || this._missing.has(key)) {
-        if (this._tiles.has(key)) {
-          console.log('ALREADY LOADED ' + key);
-        } else {
-          console.log('KNOWN MISSING ' + key);
-        }
         continue;
       }
       const failure = this._errors.get(key);
@@ -257,7 +251,6 @@ export class TilePointCloudSource {
       state: 'probing',
       abort: new AbortController(),
     };
-    console.log('PROBING ' + JSON.stringify(tile));
     this._tiles.set(tile.key, entry);
     void this._loadTile(entry);
   }
@@ -271,7 +264,6 @@ export class TilePointCloudSource {
       }
 
       if (isAbsentStatus(status)) {
-        console.log('MISSING ' + JSON.stringify(entry.tile));
         // The tileset does not have this tile. Remember it and never ask again -- including
         // when this entry has already been superseded.
         this._forget(entry);
@@ -295,7 +287,6 @@ export class TilePointCloudSource {
         return;
       }
 
-      console.log('LOADING ' + JSON.stringify(entry.tile));
       entry.state = 'loading';
       const datasetId = await this._host.loadTile(url, entry.tile.key, entry.abort.signal);
 
@@ -305,7 +296,6 @@ export class TilePointCloudSource {
         return;
       }
 
-      console.log('LOADED ' + JSON.stringify(entry.tile));
       entry.datasetId = datasetId;
       entry.state = 'active';
       this._errors.delete(entry.tile.key);
@@ -369,7 +359,6 @@ export class TilePointCloudSource {
   }
 
   private _unload(entry: TileEntry): void {
-    console.log('UNLOADING ' + JSON.stringify(entry.tile));
     entry.abort.abort();
     this._tiles.delete(entry.tile.key);
     if (entry.datasetId != null) {
