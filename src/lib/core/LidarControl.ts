@@ -7,7 +7,7 @@ import type {
   LidarEventData,
   PointCloudInfo,
   ColorScheme,
-  CopcLoadingMode,
+  PointCloudLoadOptions,
   ColormapName,
   ColorRangeConfig,
   PointCloudFullMetadata,
@@ -163,6 +163,8 @@ export class LidarControl implements IControl {
 
   // Track whether the user has explicitly set zOffset (to skip autoZOffset)
   private _manualZOffset = false;
+  /** Whether a tile has set the auto Z offset during the current tile-mode session. */
+  private _tileZOffsetApplied = false;
 
   // Metadata and cross-section components
   private _metadataPanel?: MetadataPanel;
@@ -212,7 +214,8 @@ export class LidarControl implements IControl {
       hiddenClassifications: new Set(),
       availableClassifications: new Set(),
       terrainEnabled: this._options.terrainEnabled ?? false,
-      tileMode: this._options.tileMode,
+      // onAdd turns tile mode on if requested, which is what sets this.
+      tileMode: false,
       tileModeAvailable: !!this._options.tileSource.url,
     };
     this._loader = new PointCloudLoader();
@@ -304,8 +307,9 @@ export class LidarControl implements IControl {
    * Implements the IControl interface.
    */
   onRemove(): void {
-    // Stop tile following first, so each tile unloads through the normal dataset path.
-    this.setTileMode(false);
+    // Stop tile following first, so each tile unloads through the normal dataset path. The
+    // option is left alone so re-adding the control resumes it.
+    this._stopTileMode();
 
     // Stop streaming if active
     this.stopStreaming();
@@ -809,7 +813,9 @@ export class LidarControl implements IControl {
 
     try {
       // Load the point cloud with progress reporting
-      const data = await this._loader.load(source, onProgress);
+      const data = await this._loader.load(source, onProgress, options?.signal);
+      // Not every read inside the loader can be cancelled, so check before adding anything.
+      options?.signal?.throwIfAborted();
 
       // Report final progress
       onProgress(95, 'Creating visualization layers...');
@@ -822,7 +828,7 @@ export class LidarControl implements IControl {
       let zOffset: number | undefined;
       let zOffsetEnabled = this._state.zOffsetEnabled;
 
-      if (this._options.autoZOffset && !this._manualZOffset && data.positions && data.pointCount > 0) {
+      if (this._canApplyAutoZOffset(options?.internal) && data.positions && data.pointCount > 0) {
         // Extract Z values and compute 2nd percentile (same as used for elevation coloring)
         const zValues = new Float32Array(data.pointCount);
         for (let i = 0; i < data.pointCount; i++) {
@@ -834,6 +840,7 @@ export class LidarControl implements IControl {
         zOffset = -zOffsetBase;
         zOffsetEnabled = true;
         this._pointCloudManager?.setZOffset(zOffset);
+        this._recordAutoZOffset(options?.internal);
         console.log(`Auto Z offset applied: zOffsetBase=${zOffsetBase.toFixed(1)}, zOffset=${zOffset.toFixed(1)}, enabled=${zOffsetEnabled}`);
       } else if (this._manualZOffset) {
         // User explicitly set zOffset — apply it now that the point cloud is loaded
@@ -923,7 +930,9 @@ export class LidarControl implements IControl {
           error: `Failed to load: ${error.message}`,
         });
       }
-      this._emitWithData('loaderror', { error });
+      if (!options?.signal?.aborted) {
+        this._emitWithData('loaderror', { error });
+      }
       throw error;
     }
   }
@@ -1024,6 +1033,10 @@ export class LidarControl implements IControl {
       this._reportLoadProgress(options?.internal, 10, 'Initializing COPC file...');
       const { bounds, totalPoints, hasRGB, spacing } =
         await streamingLoader.initialize();
+      if (options?.signal?.aborted) {
+        streamingLoader.destroy();
+        options.signal.throwIfAborted();
+      }
 
       this._reportLoadProgress(options?.internal, 20, 'Setting up streaming...');
 
@@ -1036,13 +1049,14 @@ export class LidarControl implements IControl {
         this._refreshAttributeColorBounds();
 
         // Auto Z offset: use bounds.minZ from the COPC header (reliable source)
-        if (this._options.autoZOffset && !this._manualZOffset && !autoZOffsetApplied && data.bounds) {
+        if (this._canApplyAutoZOffset(options?.internal) && !autoZOffsetApplied && data.bounds) {
           // Use bounds.minZ as the ground level (from file header, always accurate)
           const zOffsetBase = data.bounds.minZ;
 
           // Apply negative offset to convert absolute elevation to relative height above ground
           const zOffset = -zOffsetBase;
           this._pointCloudManager?.setZOffset(zOffset);
+          this._recordAutoZOffset(options?.internal);
           console.log(`Auto Z offset applied (streaming): ${zOffset.toFixed(1)}m (ground level from bounds: ${zOffsetBase.toFixed(1)}m)`);
           // Update state to trigger panel slider update
           this.setState({
@@ -1231,7 +1245,9 @@ export class LidarControl implements IControl {
         streamingActive: hasActiveStreaming,
         ...(options?.internal ? {} : { loading: false, error: `Failed to load: ${error.message}` }),
       });
-      this._emitWithData('loaderror', { error });
+      if (!options?.signal?.aborted) {
+        this._emitWithData('loaderror', { error });
+      }
       throw error;
     }
   }
@@ -1269,7 +1285,11 @@ export class LidarControl implements IControl {
 
       // Initialize - reads ept.json metadata
       this._reportLoadProgress(options?.internal, 10, 'Initializing EPT dataset...');
-      const { bounds, totalPoints, hasRGB, spacing } = await eptLoader.initialize();
+      const { bounds, totalPoints, hasRGB, spacing } = await eptLoader.initialize(options?.signal);
+      if (options?.signal?.aborted) {
+        eptLoader.destroy();
+        options.signal.throwIfAborted();
+      }
 
       this._reportLoadProgress(options?.internal, 20, 'Setting up streaming...');
 
@@ -1282,10 +1302,11 @@ export class LidarControl implements IControl {
         this._refreshAttributeColorBounds();
 
         // Auto Z offset
-        if (this._options.autoZOffset && !this._manualZOffset && !autoZOffsetApplied && data.bounds) {
+        if (this._canApplyAutoZOffset(options?.internal) && !autoZOffsetApplied && data.bounds) {
           const zOffsetBase = data.bounds.minZ;
           const zOffset = -zOffsetBase;
           this._pointCloudManager?.setZOffset(zOffset);
+          this._recordAutoZOffset(options?.internal);
           console.log(`Auto Z offset applied (EPT streaming): ${zOffset.toFixed(1)}m`);
           this.setState({
             zOffsetBase,
@@ -1438,7 +1459,9 @@ export class LidarControl implements IControl {
         streamingActive: hasActiveStreaming,
         ...(options?.internal ? {} : { loading: false, error: `Failed to load EPT: ${error.message}` }),
       });
-      this._emitWithData('loaderror', { error });
+      if (!options?.signal?.aborted) {
+        this._emitWithData('loaderror', { error });
+      }
       throw error;
     }
   }
@@ -1524,7 +1547,10 @@ export class LidarControl implements IControl {
         }, 100);
       }
     } catch (err) {
-      console.warn('Failed to load EPT nodes for viewport:', err);
+      // The dataset may have been unloaded mid-update, cancelling its requests.
+      if (this._eptStreamingLoaders.has(datasetId)) {
+        console.warn('Failed to load EPT nodes for viewport:', err);
+      }
     }
   }
 
@@ -1698,34 +1724,25 @@ export class LidarControl implements IControl {
    * Turns automatic, map-following point cloud loading on or off.
    *
    * With it on, tiles from `tileSource.url` covering the view are loaded as the map moves
-   * and unloaded once they leave it. Loading a file by hand is unaffected and the two can
-   * be used together.
+   * and unloaded once they leave it.
    *
    * @param enabled - Whether tiles should follow the map
    */
   setTileMode(enabled: boolean): void {
-    if (enabled === (this._tileSource != null)) {
-      return;
-    }
-
     if (enabled && !this._options.tileSource.url) {
       console.warn('LidarControl: tile mode requires tileSource.url');
       return;
     }
 
+    // Remembered so that onAdd, possibly after a remove, can act on it.
+    this._options.tileMode = enabled;
+
     if (!enabled) {
-      this._tileViewportManager?.destroy();
-      this._tileViewportManager = undefined;
-      this._tileSource?.destroy();
-      this._tileSource = undefined;
-      this.setState({ tileMode: false });
-      this._panelBuilder?.updateState(this._state);
+      this._stopTileMode();
       return;
     }
 
-    if (this._map == null) {
-      // Added before the control is on a map; onAdd will turn it on.
-      this._options.tileMode = true;
+    if (this._tileSource != null || this._map == null) {
       return;
     }
 
@@ -1744,6 +1761,23 @@ export class LidarControl implements IControl {
   }
 
   /**
+   * Unloads every tile and stops following the map, without changing whether tile mode
+   * is requested.
+   */
+  private _stopTileMode(): void {
+    if (this._tileSource == null) {
+      return;
+    }
+    this._tileViewportManager?.destroy();
+    this._tileViewportManager = undefined;
+    this._tileSource.destroy();
+    this._tileSource = undefined;
+    this._tileZOffsetApplied = false;
+    this.setState({ tileMode: false });
+    this._panelBuilder?.updateState(this._state);
+  }
+
+  /**
    * Adapts this control to the interface the tile source drives. Each tile is an ordinary
    * dataset, loaded the same way as a single URL, but one that never falls back to a
    * whole-file download, never moves the map, and is marked internal so the panel does
@@ -1751,12 +1785,13 @@ export class LidarControl implements IControl {
    */
   private _createTileHost(): TilePointCloudHost {
     return {
-      loadTile: async (url, label) => {
+      loadTile: async (url, label, signal) => {
         const info = await this.loadPointCloud(url, {
           name: `Tile ${label}`,
           autoZoom: false,
           allowFullDownloadFallback: false,
           internal: true,
+          signal,
         });
         return info.id;
       },
@@ -1764,6 +1799,22 @@ export class LidarControl implements IControl {
         this.unloadPointCloud(datasetId);
       },
     };
+  }
+
+  /**
+   * Whether a load may set the auto Z offset. The offset is global, so tiles share one per
+   * tile-mode session, set by whichever tile gets there first; otherwise each arriving tile
+   * would shift the whole cloud to its own ground level.
+   */
+  private _canApplyAutoZOffset(internal: boolean | undefined): boolean {
+    return this._options.autoZOffset && !this._manualZOffset && !(internal && this._tileZOffsetApplied);
+  }
+
+  /** Notes that a load set the auto Z offset. */
+  private _recordAutoZOffset(internal: boolean | undefined): void {
+    if (internal) {
+      this._tileZOffsetApplied = true;
+    }
   }
 
   /**
@@ -1850,7 +1901,10 @@ export class LidarControl implements IControl {
       // completes, so no follow-up pass is needed here.
       await streamingLoader.loadQueuedNodes();
     } catch (err) {
-      console.warn('Failed to load nodes for viewport:', err);
+      // The dataset may have been unloaded mid-update, cancelling its requests.
+      if (this._streamingLoaders.has(datasetId)) {
+        console.warn('Failed to load nodes for viewport:', err);
+      }
     }
   }
 

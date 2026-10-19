@@ -195,22 +195,24 @@ export class PointCloudLoader {
    *
    * @param source - URL string, File object, or ArrayBuffer
    * @param onProgress - Optional progress callback (progress: 0-100, message: string)
+   * @param signal - Optional signal that cancels whole-file downloads
    * @returns Normalized point cloud data
    */
   async load(
     source: string | File | ArrayBuffer,
-    onProgress?: (progress: number, message: string) => void
+    onProgress?: (progress: number, message: string) => void,
+    signal?: AbortSignal,
   ): Promise<PointCloudData> {
     this._onProgress = onProgress;
 
     if (typeof source === 'string') {
       // URL - check if it's HTTP(S) for remote loading
       if (source.startsWith('http://') || source.startsWith('https://')) {
-        return await this._loadCopcFromUrl(source);
+        return await this._loadCopcFromUrl(source, signal);
       } else {
         // Local file path or data URL - fetch and load as buffer
         this._reportProgress(5, 'Fetching file...');
-        const response = await fetch(source);
+        const response = await fetch(source, { signal });
         const buffer = await response.arrayBuffer();
         return await this._loadCopcFromBuffer(buffer);
       }
@@ -245,7 +247,7 @@ export class PointCloudLoader {
    * Loads a COPC file from a URL using the copc.js library.
    * Falls back to loaders.gl for unsupported LAS versions (e.g., 1.3).
    */
-  private async _loadCopcFromUrl(url: string): Promise<PointCloudData> {
+  private async _loadCopcFromUrl(url: string, signal?: AbortSignal): Promise<PointCloudData> {
     this._reportProgress(5, 'Initializing decoder...');
     await this._yieldToUI();
 
@@ -278,7 +280,7 @@ export class PointCloudLoader {
       )) {
         console.warn('copc.js cannot load this file, falling back to loaders.gl:', error.message);
         this._reportProgress(10, 'Using alternative decoder...');
-        return await this._loadUrlWithLoadersGL(url);
+        return await this._loadUrlWithLoadersGL(url, signal);
       }
       throw error;
     }
@@ -771,12 +773,12 @@ export class PointCloudLoader {
   /**
    * Loads a point cloud from URL using loaders.gl (fallback for unsupported LAS versions).
    */
-  private async _loadUrlWithLoadersGL(url: string): Promise<PointCloudData> {
+  private async _loadUrlWithLoadersGL(url: string, signal?: AbortSignal): Promise<PointCloudData> {
     this._reportProgress(15, 'Downloading file...');
     await this._yieldToUI();
 
     // Fetch the file
-    const response = await fetch(url);
+    const response = await fetch(url, { signal });
     if (!response.ok) {
       throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
     }

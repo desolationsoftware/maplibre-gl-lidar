@@ -7,9 +7,10 @@ import { isEptUrl, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
  */
 export interface TilePointCloudHost {
   /**
-   * Loads one tile and resolves to its dataset id.
+   * Loads one tile and resolves to its dataset id. Once `signal` aborts, the load should
+   * stop and reject without adding the tile to the map.
    */
-  loadTile(url: string, label: string): Promise<string>;
+  loadTile(url: string, label: string, signal: AbortSignal): Promise<string>;
 
   /** Tears down a dataset: loader, deck.gl layers and control state. */
   unloadTile(datasetId: string): void;
@@ -86,8 +87,8 @@ const DEFAULTS = {
  * One instance owns the whole tile lifecycle for the map. Calling {@link update} refreshes the tiles.
  *
  * Tile availability is discovered optimistically. There is no coverage index; each tile is
- * probed, and a 404 puts it in a negative cache that is never retried for the life of the
- * session. Other failures back off exponentially.
+ * probed, and a client error (see {@link isAbsentStatus}) puts it in a negative cache that is
+ * never retried for the life of the session. Other failures back off exponentially.
  */
 export class TilePointCloudSource {
   private readonly _host: TilePointCloudHost;
@@ -132,7 +133,7 @@ export class TilePointCloudSource {
     }
     this._lastViewport = viewport;
 
-    if (Math.ceil(viewport.zoom) < this._options.minZoom) {
+    if (viewport.zoom < this._options.minZoom) {
       this.unloadAll();
       return;
     }
@@ -269,7 +270,7 @@ export class TilePointCloudSource {
         return;
       }
 
-      if (status === 404) {
+      if (isAbsentStatus(status)) {
         console.log('MISSING ' + JSON.stringify(entry.tile));
         // The tileset does not have this tile. Remember it and never ask again -- including
         // when this entry has already been superseded.
@@ -283,7 +284,6 @@ export class TilePointCloudSource {
         return;
       }
       if (status >= 400) {
-        // TODO need retry at the moment?
         this._recordFailure(entry, new Error(`tile probe failed with status ${status}`));
         return;
       }
@@ -297,7 +297,7 @@ export class TilePointCloudSource {
 
       console.log('LOADING ' + JSON.stringify(entry.tile));
       entry.state = 'loading';
-      const datasetId = await this._host.loadTile(url, entry.tile.key);
+      const datasetId = await this._host.loadTile(url, entry.tile.key, entry.abort.signal);
 
       if (this._isStale(entry)) {
         // The tile left the range while its header was loading; drop what we just built.
@@ -376,6 +376,13 @@ export class TilePointCloudSource {
       this._host.unloadTile(entry.datasetId);
     }
   }
+}
+
+/**
+ * Whether a probe status means the tile does not exist. Any 4xx counts besides 408 and 429
+ */
+function isAbsentStatus(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
 /**

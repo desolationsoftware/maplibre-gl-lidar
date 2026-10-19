@@ -25,12 +25,15 @@ export interface PointCloudLoadOptions {
    */
   allowFullDownloadFallback?: boolean;
   /**
-   * Marks the dataset as machine-managed, such as one tile of a larger whole. The panel
-   * summarizes it rather than listing it, and its load leaves the control's loading,
-   * error and active dataset state alone. It is also excluded from share URLs.
+   * Marks the dataset as machine-managed, such as one tile of a larger dataset. The panel
+   * summarizes it rather than listing it and excludes it from share URLs.
    * @default false
    */
   internal?: boolean;
+  /**
+   * Abandons the load when aborted.
+   */
+  signal?: AbortSignal;
 }
 
 /**

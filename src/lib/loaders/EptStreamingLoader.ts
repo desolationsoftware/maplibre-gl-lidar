@@ -187,6 +187,7 @@ export class EptStreamingLoader {
   private _baseUrl: string;
   private _options: Required<StreamingLoaderOptions>;
   private _metadata: EptMetadata | null = null;
+  private readonly _abort = new AbortController();
 
   // Hierarchy cache
   private _hierarchyCache: Map<string, EptHierarchy> = new Map();
@@ -262,15 +263,14 @@ export class EptStreamingLoader {
    *
    * @returns Initial info about the point cloud
    */
-  async initialize(): Promise<{
+  async initialize(signal?: AbortSignal): Promise<{
     bounds: PointCloudBounds;
     totalPoints: number;
     hasRGB: boolean;
     spacing: number;
   }> {
-    // Fetch and parse ept.json
     try {
-      const response = await fetch(`${this._baseUrl}/ept.json`);
+      const response = await fetch(`${this._baseUrl}/ept.json`, { signal });
       if (!response.ok) {
         throw new Error(`Failed to fetch ept.json: ${response.status} ${response.statusText}`);
       }
@@ -618,7 +618,7 @@ export class EptStreamingLoader {
     const url = `${this._baseUrl}/ept-hierarchy/${key}.json`;
     this._hierarchyLoading.add(key);
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: this._abort.signal });
       if (!response.ok) {
         this._hierarchyFailures.set(key, Date.now());
         console.warn(`Failed to load hierarchy ${key}: ${response.status}`);
@@ -669,6 +669,9 @@ export class EptStreamingLoader {
         }
       }
     } catch (error) {
+      if (this._abort.signal.aborted) {
+        return;
+      }
       this._hierarchyFailures.set(key, Date.now());
       console.warn(`Error loading hierarchy ${key}:`, error);
     } finally {
@@ -976,6 +979,10 @@ export class EptStreamingLoader {
 
       this._scheduleLayerUpdate();
     } catch (error) {
+      // Destroyed mid-load: the buffers are gone and nothing is waiting on this node.
+      if (this._abort.signal.aborted) {
+        return;
+      }
       // Release the reserved space only when no later node has reserved after
       // it: otherwise a later node could be handed an overlapping range. A gap
       // left behind is reclaimed once no request is in flight
@@ -1009,8 +1016,10 @@ export class EptStreamingLoader {
       }
     } finally {
       this._activeRequests--;
-      this._reclaimFailedReservations();
-      this.loadQueuedNodes();
+      if (!this._abort.signal.aborted) {
+        this._reclaimFailedReservations();
+        this.loadQueuedNodes();
+      }
     }
   }
 
@@ -1067,6 +1076,7 @@ export class EptStreamingLoader {
         fp64: false,
       },
       worker: false,
+      core: { fetch: { signal: this._abort.signal } },
     }) as any;
 
     // Get point data from the loaded result (loaders.gl mesh format)
@@ -1164,7 +1174,7 @@ export class EptStreamingLoader {
     node: EptCachedNode,
     startIndex: number
   ): Promise<void> {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: this._abort.signal });
     if (!response.ok) {
       throw new Error(`Failed to fetch binary data: ${response.status}`);
     }
@@ -1646,6 +1656,7 @@ export class EptStreamingLoader {
    * Destroys the streaming loader and cleans up resources.
    */
   destroy(): void {
+    this._abort.abort();
     if (this._updateBatchTimeout) {
       clearTimeout(this._updateBatchTimeout);
     }
