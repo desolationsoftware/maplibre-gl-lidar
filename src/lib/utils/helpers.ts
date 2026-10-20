@@ -258,3 +258,10 @@ export function computePercentileBounds(
   return { min, max };
 }
 
+/**
+ * Checks whether two optional bounds are equal.
+ */
+export function boundsEqual(a?: { min: number; max: number }, b?: { min: number; max: number }): boolean {
+  return a === b || (a !== undefined && b !== undefined && a.min === b.min && a.max === b.max);
+}
+
