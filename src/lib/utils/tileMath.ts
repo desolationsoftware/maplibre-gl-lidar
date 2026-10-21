@@ -5,6 +5,8 @@
  * antimeridian, y increases southward from the north edge.
  */
 
+import { clamp, normalizeLng } from './helpers';
+
 /** Latitude beyond which the web-mercator projection is undefined. */
 const MERCATOR_MAX_LATITUDE = 85.051129;
 
@@ -31,15 +33,6 @@ export class TileId {
   }
 }
 
-function clampLatitude(lat: number): number {
-  return Math.max(-MERCATOR_MAX_LATITUDE, Math.min(MERCATOR_MAX_LATITUDE, lat));
-}
-
-/** Folds a longitude into [-180, 180). */
-export function normalizeLng(lng: number): number {
-  return (lng % 360 + 360 + 180) % 360 - 180;
-}
-
 /** Tile X index containing a longitude. */
 export function lngToTileX(lng: number, zoom: number): number {
   const scale = Math.pow(2, zoom);
@@ -50,7 +43,7 @@ export function lngToTileX(lng: number, zoom: number): number {
 /** Tile Y index containing a latitude. */
 export function latToTileY(lat: number, zoom: number): number {
   const scale = Math.pow(2, zoom);
-  const latRad = (clampLatitude(lat) * Math.PI) / 180;
+  const latRad = (clamp(lat, -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE) * Math.PI) / 180;
   const y = Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * scale);
   return Math.max(0, Math.min(scale - 1, y));
 }
