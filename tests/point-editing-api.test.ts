@@ -110,6 +110,7 @@ describe('DeckOverlay.getViewport', () => {
 type QueueInternals = {
   _loadingQueue: { key: string; pointCount: number }[];
   _activeRequests: number;
+  _activeFetches?: number;
   _loadNode: (node: { key: string }) => Promise<void>;
 };
 
@@ -122,14 +123,16 @@ describe.each([
     const internals = loader as unknown as QueueInternals;
     const started: string[] = [];
     let finishFirst!: () => void;
-    // Mirrors _loadNode: count the request, and drain the queue when it ends.
+    // Mirrors _loadNode: count the request (and, for EPT, the download), and drain the queue when it ends.
     internals._loadNode = async (node) => {
       started.push(node.key);
       internals._activeRequests++;
+      internals._activeFetches = (internals._activeFetches ?? 0) + 1;
       try {
         if (node.key === 'a') await new Promise<void>((resolve) => (finishFirst = resolve));
       } finally {
         internals._activeRequests--;
+        internals._activeFetches--;
         void loader.loadQueuedNodes();
       }
     };

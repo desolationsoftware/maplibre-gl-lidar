@@ -29,16 +29,14 @@ import { MetadataPanel } from '../gui/MetadataPanel';
 import { CrossSectionPanel } from '../gui/CrossSectionPanel';
 import { CrossSectionTool } from '../tools/CrossSectionTool';
 import { ElevationProfileExtractor } from '../tools/ElevationProfileExtractor';
-import { computePercentileBounds, generateId, getFilename, isEptUrl } from '../utils/helpers';
+import { computePercentileBounds, generateId, getFilename, isEptUrl, boundsEqual } from '../utils/helpers';
 import { createLidarSharePayload, createLidarShareUrl, parseLidarSharePayloadFromUrl } from '../utils/share-url';
 import { type ClassificationStyles, colorSchemeToDomainKey, getAvailableClassifications, getClassificationName, isGradientColorScheme } from '../colorizers/ColorScheme';
 
 /**
- * Checks whether two optional bounds are equal.
+ * Concurrent node downloads per tile.
  */
-function boundsEqual(a?: { min: number; max: number }, b?: { min: number; max: number }): boolean {
-  return a === b || (a !== undefined && b !== undefined && a.min === b.min && a.max === b.max);
-}
+const TILE_MAX_CONCURRENT_REQUESTS = 24;
 
 /**
  * Default options for the LidarControl
@@ -1792,6 +1790,7 @@ export class LidarControl implements IControl {
           autoZoom: false,
           allowFullDownloadFallback: false,
           internal: true,
+          maxConcurrentRequests: TILE_MAX_CONCURRENT_REQUESTS,
           signal,
         });
         return info.id;
