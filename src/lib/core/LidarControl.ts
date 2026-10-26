@@ -1483,7 +1483,9 @@ export class LidarControl implements IControl {
         this._eptViewportRequestIds.set(datasetId, currentRequestId);
       }
 
-      if (this._eptViewportRequestIds.get(datasetId) !== currentRequestId) return;
+      // A newer viewport update may start while this one awaits; it takes over from there.
+      const isStale = () => this._eptViewportRequestIds.get(datasetId) !== currentRequestId;
+      if (isStale()) return;
 
       eptLoader.pruneQueueForViewport(viewport);
 
@@ -1494,13 +1496,13 @@ export class LidarControl implements IControl {
           currentRequestId,
           eptLoader,
           viewport,
-          () => this._eptStreamingLoaders.get(datasetId) === eptLoader &&
-            this._eptViewportRequestIds.get(datasetId) === currentRequestId,
+          () => this._eptStreamingLoaders.get(datasetId) === eptLoader && !isStale(),
           () => this._handleViewportChangeForEptStreaming(viewport, datasetId, currentRequestId),
         );
       }
 
       let nodesToLoad = await eptLoader.selectNodesForViewport(viewport);
+      if (isStale()) return;
 
       let resetSucceeded = false;
       const loadedPoints = eptLoader.getLoadedPointCount();
@@ -1522,6 +1524,7 @@ export class LidarControl implements IControl {
         resetSucceeded = eptLoader.resetLoadedData();
         if (resetSucceeded) {
           nodesToLoad = await eptLoader.selectNodesForViewport(viewport);
+          if (isStale()) return;
         }
       }
 
@@ -1530,6 +1533,7 @@ export class LidarControl implements IControl {
       if (!budgetReached && coverageRatio < 0.1 && nodesToLoad.length === 0) {
         // Force another subtree discovery pass
         nodesToLoad = await eptLoader.selectNodesForViewport(viewport);
+        if (isStale()) return;
       }
 
       for (const node of nodesToLoad) {
@@ -1538,7 +1542,7 @@ export class LidarControl implements IControl {
 
       await eptLoader.loadQueuedNodes();
 
-      if (this._eptViewportRequestIds.get(datasetId) !== currentRequestId) return;
+      if (isStale()) return;
 
       // Only retry if we need more coverage AND there's pending work
       // Don't retry if coverage is already good (>= 50%)
@@ -1907,7 +1911,9 @@ export class LidarControl implements IControl {
         this._copcViewportRequestIds.set(datasetId, currentRequestId);
       }
 
-      if (this._copcViewportRequestIds.get(datasetId) !== currentRequestId) return;
+      // A newer viewport update may start while this one awaits; it takes over from there.
+      const isStale = () => this._copcViewportRequestIds.get(datasetId) !== currentRequestId;
+      if (isStale()) return;
 
       streamingLoader.pruneQueueForViewport(viewport);
 
@@ -1918,15 +1924,13 @@ export class LidarControl implements IControl {
           currentRequestId,
           streamingLoader,
           viewport,
-          () => this._streamingLoaders.get(datasetId) === streamingLoader &&
-            this._copcViewportRequestIds.get(datasetId) === currentRequestId,
+          () => this._streamingLoaders.get(datasetId) === streamingLoader && !isStale(),
           () => this._handleViewportChangeForStreaming(viewport, datasetId, currentRequestId),
         );
       }
 
       let nodesToLoad = await streamingLoader.selectNodesForViewport(viewport);
-
-      if (this._copcViewportRequestIds.get(datasetId) !== currentRequestId) return;
+      if (isStale()) return;
 
       let resetSucceeded = false;
       const loadedPoints = streamingLoader.getLoadedPointCount();
@@ -1948,6 +1952,7 @@ export class LidarControl implements IControl {
           return;
         }
         nodesToLoad = await streamingLoader.selectNodesForViewport(viewport);
+        if (isStale()) return;
       }
 
       // Queue nodes for loading

@@ -711,12 +711,10 @@ export class CopcStreamingLoader {
    * nodes give way to coarser ones.
    */
   private _loadedKeysToKeep(viewport: ViewportInfo): Set<string> {
-    let pinnedPoints = 0;
     const candidates: BudgetCandidate[] = [];
     for (const node of this._nodeCache.values()) {
       const loaded = node.state === 'loaded' && node.bufferStartIndex !== undefined;
       if (this._pinnedKeys.has(node.key)) {
-        pinnedPoints += loaded ? node.pointCount : 0;
         continue;
       }
       const wanted = loaded
@@ -731,11 +729,23 @@ export class CopcStreamingLoader {
         });
       }
     }
-    const keep = loadedKeysWithinBudget(candidates, this._options.pointBudget - pinnedPoints);
+    const keep = loadedKeysWithinBudget(candidates, this._options.pointBudget - this._pinnedLoadedPoints());
     for (const key of this._pinnedKeys) {
       keep.add(key);
     }
     return keep;
+  }
+
+  /** Points of the loaded nodes {@link loadRegion} pinned. */
+  private _pinnedLoadedPoints(): number {
+    let points = 0;
+    for (const key of this._pinnedKeys) {
+      const node = this._nodeCache.get(key);
+      if (node?.state === 'loaded' && node.bufferStartIndex !== undefined) {
+        points += node.pointCount;
+      }
+    }
+    return points;
   }
 
   /**
@@ -779,6 +789,8 @@ export class CopcStreamingLoader {
     // A region load has sized its request against the free buffer space;
     // viewport nodes wait until it finishes.
     if (this._paused || this._regionLoading) return;
+    // Eviction plans with this budget too, so a node too big for it can't block the queue.
+    const unpinnedBudget = this._options.pointBudget - this._pinnedLoadedPoints();
     while (
       this._loadingQueue.length > 0 &&
       this._activeRequests < this._options.maxConcurrentRequests &&
@@ -787,8 +799,8 @@ export class CopcStreamingLoader {
       // Left queued if it doesn't fit, so it loads once the budget allows.
       const node = this._loadingQueue[0];
 
-      // A node larger than the whole budget can never load.
-      if (node.pointCount > this._options.pointBudget) {
+      // A node larger than what pinned nodes leave of the budget can't load while they're pinned.
+      if (node.pointCount > unpinnedBudget) {
         this._loadingQueue.shift();
         continue;
       }
@@ -818,9 +830,7 @@ export class CopcStreamingLoader {
     );
 
     for (const node of this._loadingQueue) {
-      const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-      const depth = node.keyArray[0];
-      node.priority = nodeLoadPriority(depth, distPriority);
+      node.priority = this._nodeLoadPriority(node, viewport);
     }
 
     this._loadingQueue.sort(compareNodePriority);

@@ -1520,7 +1520,8 @@ export class EptStreamingLoader {
   setPointBudget(pointBudget: number): boolean {
     this._options.pointBudget = pointBudget;
     void this.loadQueuedNodes();
-    return this._totalLoadedPoints > pointBudget;
+    // Downloads reserve their points only once they arrive, so count them separately.
+    return this._totalLoadedPoints + this._fetchingPoints > pointBudget;
   }
 
   /**
@@ -1623,9 +1624,7 @@ export class EptStreamingLoader {
     );
 
     for (const node of this._loadingQueue) {
-      const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-      const depth = node.keyArray[0];
-      node.priority = nodeLoadPriority(depth, distPriority);
+      node.priority = this._nodeLoadPriority(node, viewport);
     }
 
     this._loadingQueue.sort(compareNodePriority);
