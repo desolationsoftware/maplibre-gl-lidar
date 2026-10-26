@@ -154,6 +154,11 @@ export class LidarControl implements IControl {
   private _viewportManagers: Map<string, ViewportManager> = new Map();
   private _copcViewportRequestIds: Map<string, number> = new Map();
   private _eptViewportRequestIds: Map<string, number> = new Map();
+  /**
+   * Viewport request ids, by dataset, waiting for in-flight requests to finish so out-of-view
+   * nodes can be evicted.
+   */
+  private _pendingEvictions: Map<string, number> = new Map();
 
   // Tile-driven loading.
   private _tileSource?: TilePointCloudSource;
@@ -1484,10 +1489,15 @@ export class LidarControl implements IControl {
 
       const evictSucceeded = eptLoader.evictLoadedNodesOutsideViewport(viewport);
       if (!evictSucceeded) {
-        setTimeout(() => {
-          this._handleViewportChangeForEptStreaming(viewport, datasetId, currentRequestId);
-        }, 200);
-        return;
+        this._rerunOnceEvictable(
+          datasetId,
+          currentRequestId,
+          eptLoader,
+          viewport,
+          () => this._eptStreamingLoaders.get(datasetId) === eptLoader &&
+            this._eptViewportRequestIds.get(datasetId) === currentRequestId,
+          () => this._handleViewportChangeForEptStreaming(viewport, datasetId, currentRequestId),
+        );
       }
 
       let nodesToLoad = await eptLoader.selectNodesForViewport(viewport);
@@ -1495,7 +1505,8 @@ export class LidarControl implements IControl {
       let resetSucceeded = false;
       const loadedPoints = eptLoader.getLoadedPointCount();
       const pointBudget = eptLoader.getPointBudget();
-      const budgetReached = loadedPoints >= pointBudget * 0.8; // 80% threshold
+      // Until eviction runs, the loaded count includes out-of-view nodes, so it can't be trusted.
+      const budgetReached = evictSucceeded && loadedPoints >= pointBudget * 0.8; // 80% threshold
       const minDepthForCoverage = Math.max(0, viewport.targetDepth - 2);
 
       // Check coverage ratio - if less than 50% is covered, we need to load more.
@@ -1505,6 +1516,10 @@ export class LidarControl implements IControl {
 
       const hasPendingSubtrees = eptLoader.hasPendingSubtrees(viewport);
       const hasPendingWork = nodesToLoad.length > 0 || hasPendingSubtrees;
+
+      if (budgetReached) {
+        console.log(`BUDGET REACHED! ${datasetId}`);
+      }
 
       // Reset if budget is reached but we need more coverage in current viewport
       if (budgetReached && needsCoverage && hasPendingWork) {
@@ -1841,6 +1856,41 @@ export class LidarControl implements IControl {
   }
 
   /**
+   * Eviction can't run while requests are writing into the buffers. Rather than hold up node
+   * selection, polls until it can evict, then reruns the viewport handler once with the
+   * freed budget. Stops if `isCurrent` turns false, i.e. a newer viewport or an unload.
+   */
+  private _rerunOnceEvictable(
+    datasetId: string,
+    requestId: number,
+    loader: Pick<EptStreamingLoader, 'evictLoadedNodesOutsideViewport'>,
+    viewport: ViewportInfo,
+    isCurrent: () => boolean,
+    rerun: () => void,
+  ): void {
+    if (this._pendingEvictions.get(datasetId) === requestId) {
+      return;
+    }
+    this._pendingEvictions.set(datasetId, requestId);
+    const poll = (): void => {
+      if (this._pendingEvictions.get(datasetId) !== requestId) {
+        return;
+      }
+      if (!isCurrent()) {
+        this._pendingEvictions.delete(datasetId);
+        return;
+      }
+      if (!loader.evictLoadedNodesOutsideViewport(viewport)) {
+        setTimeout(poll, 200);
+        return;
+      }
+      this._pendingEvictions.delete(datasetId);
+      rerun();
+    };
+    setTimeout(poll, 200);
+  }
+
+  /**
    * Handles viewport changes for streaming mode.
    * Selects and loads nodes based on current viewport.
    *
@@ -1867,10 +1917,15 @@ export class LidarControl implements IControl {
 
       const evictSucceeded = streamingLoader.evictLoadedNodesOutsideViewport(viewport);
       if (!evictSucceeded) {
-        setTimeout(() => {
-          this._handleViewportChangeForStreaming(viewport, datasetId, currentRequestId);
-        }, 200);
-        return;
+        this._rerunOnceEvictable(
+          datasetId,
+          currentRequestId,
+          streamingLoader,
+          viewport,
+          () => this._streamingLoaders.get(datasetId) === streamingLoader &&
+            this._copcViewportRequestIds.get(datasetId) === currentRequestId,
+          () => this._handleViewportChangeForStreaming(viewport, datasetId, currentRequestId),
+        );
       }
 
       let nodesToLoad = await streamingLoader.selectNodesForViewport(viewport);
@@ -1880,7 +1935,7 @@ export class LidarControl implements IControl {
       let resetSucceeded = false;
       const loadedPoints = streamingLoader.getLoadedPointCount();
       const pointBudget = streamingLoader.getPointBudget();
-      const budgetReached = loadedPoints >= pointBudget * 0.8;
+      const budgetReached = evictSucceeded && loadedPoints >= pointBudget * 0.8;
       const minDepthForCoverage = Math.max(0, viewport.targetDepth - 2);
       const coverageRatio = streamingLoader.getViewportCoverageRatio(viewport, minDepthForCoverage);
       // Skipped for internal datasets, which only cover part of the viewport.
