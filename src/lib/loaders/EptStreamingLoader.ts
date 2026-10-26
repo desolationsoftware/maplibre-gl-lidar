@@ -1462,6 +1462,18 @@ export class EptStreamingLoader {
   }
 
   /**
+   * Changes the point budget. Loading resumes if it grew; points already loaded past a
+   * smaller budget stay until the next {@link evictLoadedNodesOutsideViewport}.
+   *
+   * @returns True if more points are loaded or loading than the new budget allows
+   */
+  setPointBudget(pointBudget: number): boolean {
+    this._options.pointBudget = pointBudget;
+    void this.loadQueuedNodes();
+    return this._totalLoadedPoints > pointBudget;
+  }
+
+  /**
    * Gets the current point budget.
    */
   getPointBudget(): number {

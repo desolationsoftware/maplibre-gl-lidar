@@ -753,7 +753,7 @@ export class LidarControl implements IControl {
    */
   async loadPointCloud(
     source: string | File | ArrayBuffer,
-    options?: PointCloudLoadOptions,
+    options?: StreamingLoaderOptions & PointCloudLoadOptions,
   ): Promise<PointCloudInfo> {
     // Route EPT URLs to EPT streaming loader
     if (typeof source === 'string' && isEptUrl(source)) {
@@ -1785,9 +1785,10 @@ export class LidarControl implements IControl {
    */
   private _createTileHost(): TilePointCloudHost {
     return {
-      loadTile: async (url, label, signal) => {
+      loadTile: async (url, label, signal, pointBudget) => {
         const info = await this.loadPointCloud(url, {
           name: `Tile ${label}`,
+          pointBudget,
           autoZoom: false,
           allowFullDownloadFallback: false,
           internal: true,
@@ -1797,6 +1798,13 @@ export class LidarControl implements IControl {
       },
       unloadTile: (datasetId) => {
         this.unloadPointCloud(datasetId);
+      },
+      setTileBudget: (datasetId, pointBudget) => {
+        const loader = this._eptStreamingLoaders.get(datasetId) ?? this._streamingLoaders.get(datasetId);
+        // Eviction is what drops points past a smaller budget, and it runs on a viewport update.
+        if (loader?.setPointBudget(pointBudget)) {
+          this._viewportManagers.get(datasetId)?.forceUpdate();
+        }
       },
     };
   }
