@@ -1,4 +1,10 @@
 /**
+ * Padding around the viewport, as a fraction of its width and height on each side, within
+ * which point cloud data is loaded and kept.
+ */
+export const VIEWPORT_BUFFER_FACTOR = 0.2;
+
+/**
  * Clamps a value between a minimum and maximum.
  *
  * @param value - The value to clamp
