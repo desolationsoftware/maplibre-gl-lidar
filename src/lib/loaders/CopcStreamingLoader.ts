@@ -787,6 +787,12 @@ export class CopcStreamingLoader {
       // Left queued if it doesn't fit, so it loads once the budget allows.
       const node = this._loadingQueue[0];
 
+      // A node larger than the whole budget can never load.
+      if (node.pointCount > this._options.pointBudget) {
+        this._loadingQueue.shift();
+        continue;
+      }
+
       // Check if loading this node would exceed budget
       if (this._totalLoadedPoints + node.pointCount > this._options.pointBudget) {
         this._emit('budgetreached', this._getProgressEvent());

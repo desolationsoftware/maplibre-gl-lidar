@@ -489,7 +489,6 @@ export class EptStreamingLoader {
   private _ensureCapacity(needed: number): void {
     const capacity = grownCapacity(this._capacity, needed, this._options.pointBudget);
     if (capacity !== this._capacity) {
-      console.log(`GROW CAPCITY FROM ${this._capacity} TO ${capacity}`);
       this._resizeBuffers(capacity);
     }
   }
@@ -498,7 +497,6 @@ export class EptStreamingLoader {
   private _fitCapacity(): void {
     const capacity = fittedCapacity(this._capacity, this._totalLoadedPoints, this._options.pointBudget);
     if (capacity !== this._capacity) {
-      console.log(`SHRINK CAPCITY FROM ${this._capacity} TO ${capacity}`);
       this._resizeBuffers(capacity);
       // The layer holds views of the old buffers until it's updated.
       this._scheduleLayerUpdate();
@@ -965,6 +963,12 @@ export class EptStreamingLoader {
     ) {
       // Left queued if it doesn't fit, so it loads once the budget allows.
       const node = this._loadingQueue[0];
+
+      // A node larger than the whole budget can never load.
+      if (node.pointCount > this._options.pointBudget) {
+        this._loadingQueue.shift();
+        continue;
+      }
 
       if (this._totalLoadedPoints + this._fetchingPoints + node.pointCount > this._options.pointBudget) {
         this._emit('budgetreached', this._getProgressEvent());
@@ -1498,63 +1502,6 @@ export class EptStreamingLoader {
         handler(event, data as Parameters<StreamingLoaderEventHandler>[1]);
       }
     }
-  }
-
-  /**
-   * Debug snapshot of loading state for nodes intersecting a viewport.
-   */
-  debugViewportState(viewport: ViewportInfo): Record<string, unknown> {
-    const maxDepth = viewport.targetDepth + 2;
-    const byState: Record<string, number> = {};
-    const pendingByDepth: Record<number, number> = {};
-    let unloadedSubtrees = 0;
-    let loadingSubtrees = 0;
-    let coolingDown = 0;
-    const now = Date.now();
-    for (const node of this._nodeCache.values()) {
-      if (!this._boundsIntersectsViewport(node.boundsWgs84, viewport)) {
-        continue;
-      }
-      const depth = node.keyArray[0];
-      if (node.state === 'subtree') {
-        if (depth <= viewport.targetDepth + 3 && !this._hierarchyCache.has(node.key)) {
-          if (this._hierarchyLoading.has(node.key)) {
-            loadingSubtrees++;
-          } else {
-            unloadedSubtrees++;
-          }
-        }
-        continue;
-      }
-      if (depth > maxDepth) {
-        continue;
-      }
-      byState[node.state] = (byState[node.state] ?? 0) + 1;
-      if (node.state === 'pending') {
-        pendingByDepth[depth] = (pendingByDepth[depth] ?? 0) + 1;
-        if (node.lastFailedAt && now - node.lastFailedAt < NODE_RETRY_COOLDOWN_MS) {
-          coolingDown++;
-        }
-      }
-    }
-    return {
-      url: this._baseUrl,
-      targetDepth: viewport.targetDepth,
-      loadedPoints: this._totalLoadedPoints,
-      fetchingPoints: this._fetchingPoints,
-      pointBudget: this._options.pointBudget,
-      capacity: this._capacity,
-      queue: this._loadingQueue.length,
-      activeRequests: this._activeRequests,
-      activeFetches: this._activeFetches,
-      paused: this._paused,
-      hasReservationGaps: this._hasReservationGaps,
-      nodesInViewByState: byState,
-      pendingInViewByDepth: pendingByDepth,
-      coolingDown,
-      unloadedSubtrees,
-      loadingSubtrees,
-    };
   }
 
   /**

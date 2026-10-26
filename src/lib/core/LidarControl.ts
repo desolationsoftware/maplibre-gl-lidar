@@ -1517,10 +1517,6 @@ export class LidarControl implements IControl {
       const hasPendingSubtrees = eptLoader.hasPendingSubtrees(viewport);
       const hasPendingWork = nodesToLoad.length > 0 || hasPendingSubtrees;
 
-      if (budgetReached) {
-        console.log(`BUDGET REACHED! ${datasetId}`);
-      }
-
       // Reset if budget is reached but we need more coverage in current viewport
       if (budgetReached && needsCoverage && hasPendingWork) {
         resetSucceeded = eptLoader.resetLoadedData();

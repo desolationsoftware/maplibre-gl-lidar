@@ -133,13 +133,17 @@ export interface BudgetCandidate {
 /**
  * Keys of the loaded candidates that fit within `budget` when every candidate, loaded or
  * not, is taken in priority order. Stops at the first that doesn't fit, as loading does, so
- * loaded nodes past that point give way to nodes that load before them.
+ * loaded nodes past that point give way to nodes that load before them. Nodes larger than
+ * the whole budget are skipped, since loading skips them too.
  */
 export function loadedKeysWithinBudget(candidates: BudgetCandidate[], budget: number): Set<string> {
   const sorted = [ ...candidates ].sort((a, b) => a.priority - b.priority);
   const keep = new Set<string>();
   let used = 0;
   for (const candidate of sorted) {
+    if (candidate.pointCount > budget) {
+      continue;
+    }
     if (used + candidate.pointCount > budget) {
       break;
     }
