@@ -1,77 +1,15 @@
-import { Las } from 'copc';
 import proj4 from 'proj4';
 import type { NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
 import type { EptCachedNode, EptDimension, EptHierarchy, EptMetadata, ParsedDimension } from './ept-types';
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
-import { getLazPerf } from './CopcStreamingLoader';
 import { type BudgetCandidate, clampLatLng, compareNodePriority, loadedKeysWithinBudget, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
-import { copyViewPoints, type PointTarget } from './viewPoints';
 import { fittedCapacity, grownCapacity, initialCapacity, resizedArray } from './pointBuffers';
-
-/**
- * Configuration for attribute storage types
- */
-interface AttributeConfig {
-  arrayType: 'float64' | 'float32' | 'uint32' | 'uint16' | 'uint8' | 'int32' | 'int16' | 'int8';
-}
-
-/**
- * Known LAS dimension configurations
- */
-const DIMENSION_CONFIGS: Record<string, AttributeConfig> = {
-  'GpsTime': { arrayType: 'float64' },
-  'ReturnNumber': { arrayType: 'uint8' },
-  'NumberOfReturns': { arrayType: 'uint8' },
-  'ScanDirectionFlag': { arrayType: 'uint8' },
-  'EdgeOfFlightLine': { arrayType: 'uint8' },
-  'ScanAngleRank': { arrayType: 'int8' },
-  'ScanAngle': { arrayType: 'float32' },
-  'UserData': { arrayType: 'uint8' },
-  'PointSourceId': { arrayType: 'uint16' },
-  'ScannerChannel': { arrayType: 'uint8' },
-  'Synthetic': { arrayType: 'uint8' },
-  'KeyPoint': { arrayType: 'uint8' },
-  'Withheld': { arrayType: 'uint8' },
-  'Overlap': { arrayType: 'uint8' },
-  'ClassFlags': { arrayType: 'uint8' },
-  'Nir': { arrayType: 'uint16' },
-  'NearInfrared': { arrayType: 'uint16' },
-  'OriginId': { arrayType: 'uint32' },
-};
-
-/**
- * Core dimensions that are handled separately
- */
-const CORE_DIMENSIONS = new Set([
-  'X', 'Y', 'Z',
-  'Intensity',
-  'Classification',
-  'Red', 'Green', 'Blue',
-]);
-
-/**
- * Creates a typed array of the appropriate type
- */
-function createAttributeArray(type: AttributeConfig['arrayType'], length: number): AttributeArray {
-  switch (type) {
-    case 'float64': return new Float64Array(length);
-    case 'float32': return new Float32Array(length);
-    case 'uint32': return new Uint32Array(length);
-    case 'uint16': return new Uint16Array(length);
-    case 'uint8': return new Uint8Array(length);
-    case 'int32': return new Int32Array(length);
-    case 'int16': return new Int16Array(length);
-    case 'int8': return new Int8Array(length);
-    default: return new Float32Array(length);
-  }
-}
+import { CORE_DIMENSIONS, createAttributeArray, DIMENSION_CONFIGS, type PointBuffers, writeDecodedPoints } from './lazDecode';
+import { decodeLaz } from './lazDecodePool';
 
 /** How long a node that failed to load waits before it is tried again. */
 const NODE_RETRY_COOLDOWN_MS = 5000;
-
-/** copc.js's Las.Header.parse requires at least the length of a LAS 1.4 header. */
-const MIN_LAS_HEADER_LENGTH = 375;
 
 /**
  * Extracts the PROJCS section from a WKT string (handles COMPD_CS)
@@ -207,6 +145,8 @@ export class EptStreamingLoader {
 
   // Coordinate transformation
   private _transformer: ((coord: [number, number]) => [number, number]) | null = null;
+  /** proj4 definition `_transformer` was built from, for decode workers to build their own. */
+  private _projection: string | null = null;
   private _verticalUnitFactor: number = 1.0;
   private _needsTransform: boolean = false;
   private _spacingInMeters: number = 0;
@@ -216,6 +156,7 @@ export class EptStreamingLoader {
   private _hasIntensity: boolean = false;
   private _totalPointsInFile: number = 0;
   private _pointByteLength: number = 0;
+  /** Dimension getters for binary point records; empty for other data types. */
   private _parsedSchema: ParsedDimension[] = [];
 
   // Extra dimensions detection
@@ -277,12 +218,14 @@ export class EptStreamingLoader {
     // Handle both 'numPoints' (standard) and 'points' (some older versions)
     this._totalPointsInFile = this._metadata.numPoints ?? (this._metadata as unknown as { points?: number }).points ?? 0;
 
-    // Parse schema to build dimension getters
-    this._parseSchema();
+    // Only binary data is read with schema getters
+    if (this._metadata.dataType === 'binary') {
+      this._parseSchema();
+    }
 
     // Check for color and intensity
-    this._hasColor = this._parsedSchema.some(p => p.dimension.name === 'Red');
-    this._hasIntensity = this._parsedSchema.some(p => p.dimension.name === 'Intensity');
+    this._hasColor = this._metadata.schema.some(dim => dim.name === 'Red');
+    this._hasIntensity = this._metadata.schema.some(dim => dim.name === 'Intensity');
 
     // Setup coordinate transformation if WKT is available
     if (this._metadata.srs?.wkt) {
@@ -291,6 +234,7 @@ export class EptStreamingLoader {
         const projConverter = proj4(wktToUse, 'EPSG:4326');
         this._transformer = (coord: [number, number]) =>
           projConverter.forward(coord) as [number, number];
+        this._projection = wktToUse;
         this._needsTransform = true;
         this._verticalUnitFactor = getVerticalUnitConversionFactor(this._metadata.srs.wkt);
       } catch (e) {
@@ -1011,9 +955,9 @@ export class EptStreamingLoader {
     try {
       const buffer = await this._fetchNodeData(this._getDataUrl(node.key), fetchController.signal);
 
-      // The download is done, so start the next one before spending main-thread time
-      // decoding this one. `_activeRequests` stays held until the decode has written its
-      // points, which is what keeps eviction and reset away from the buffers meanwhile.
+      // The download is done, so start the next one before decoding this one. `_activeRequests`
+      // stays held until the decode has written its points, which is what keeps eviction and
+      // reset away from the buffers meanwhile.
       this._releaseFetchSlot(node);
       fetchSlotHeld = false;
 
@@ -1157,7 +1101,7 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Decodes a LAZ node using copc.js
+   * Decodes a LAZ node, in a worker when possible.
    *
    * @param buffer - The LAZ file's bytes
    * @param node - Node being loaded
@@ -1168,59 +1112,49 @@ export class EptStreamingLoader {
     node: EptCachedNode,
     startIndex: number
   ): Promise<void> {
-    // Small LAS 1.2 files can be shorter than the header length copc.js requires
-    let bytes = new Uint8Array(buffer);
-    if (bytes.byteLength < MIN_LAS_HEADER_LENGTH) {
-      const padded = new Uint8Array(MIN_LAS_HEADER_LENGTH);
-      padded.set(bytes);
-      bytes = padded;
+    const decoded = await decodeLaz({
+      projection: this._needsTransform && this._transformer ? this._projection : null,
+      coordinateOrigin: this._coordinateOrigin,
+      verticalUnitFactor: this._verticalUnitFactor,
+      includeColors: this._colors !== null,
+      source: { kind: 'file', bytes: new Uint8Array(buffer) },
+      expectedPointCount: node.pointCount,
+      pointCount: Math.min(node.pointCount, this._capacity - startIndex),
+      // Until detected, ask for every extra dimension the EPT schema lists
+      extraDimensions: this._dimensionsDetected
+        ? Object.keys(this._extraAttributes)
+        : (this._metadata?.schema ?? []).map((dim) => dim.name).filter((name) => !CORE_DIMENSIONS.has(name)),
+    });
+    if (this._abort.signal.aborted) {
+      throw new Error(`Destroyed while decoding EPT node ${node.key}`);
     }
-    const header = Las.Header.parse(bytes);
-    // Only node.pointCount points are reserved in the buffers for this node
-    if (header.pointCount !== node.pointCount) {
-      throw new Error(`LAZ node ${node.key} has ${header.pointCount} points, expected ${node.pointCount}`);
-    }
-    const vlrs = await Las.Vlr.walk(async (begin, end) => bytes.subarray(begin, end), header);
-    const ebVlr = Las.Vlr.find(vlrs, 'LASF_Spec', 4);
-    const eb = ebVlr
-      ? Las.ExtraBytes.parse(bytes.subarray(ebVlr.contentOffset, ebVlr.contentOffset + ebVlr.contentLength))
-      : [];
-    const pointData = await Las.PointData.decompressFile(bytes, await getLazPerf());
-    const view = Las.View.create(pointData, header, eb);
 
     // Detect extra dimensions on first node, keeping only those the EPT schema lists
     if (!this._dimensionsDetected) {
-      for (const parsed of this._parsedSchema) {
-        const dimName = parsed.dimension.name;
-        if (!CORE_DIMENSIONS.has(dimName) && dimName in view.dimensions) {
-          this._availableDimensions.add(dimName);
-          const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
-          this._extraAttributes[dimName] = createAttributeArray(
-            config.arrayType,
-            this._capacity,
-          );
-        }
+      for (const dimName of Object.keys(decoded.extraAttributes)) {
+        this._availableDimensions.add(dimName);
+        const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
+        this._extraAttributes[dimName] = createAttributeArray(
+          config.arrayType,
+          this._capacity,
+        );
       }
       this._dimensionsDetected = true;
     }
 
-    const pointCount = Math.min(node.pointCount, this._capacity - startIndex);
-    copyViewPoints(view, pointCount, startIndex, this._pointTarget());
+    writeDecodedPoints(decoded, startIndex, this._pointBuffers());
   }
 
   /**
-   * The buffers decoded points are copied into, and how to place points in them.
+   * The buffers decoded points are copied into.
    */
-  private _pointTarget(): PointTarget {
+  private _pointBuffers(): PointBuffers {
     return {
       positions: this._positions!,
       intensities: this._intensities!,
       classifications: this._classifications!,
       colors: this._colors,
       extraAttributes: this._extraAttributes,
-      coordinateOrigin: this._coordinateOrigin,
-      toLngLat: this._needsTransform && this._transformer ? this._transformer : null,
-      verticalUnitFactor: this._verticalUnitFactor,
     };
   }
 

@@ -1,17 +1,13 @@
 import type { Copc as CopcType } from 'copc';
 import { Copc, Getter, Hierarchy } from 'copc';
-import { createLazPerf, type LazPerf } from 'laz-perf';
 import proj4 from 'proj4';
 import type { CachedNode, NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
-import { clampLatLng, compareNodePriority, loadedKeysWithinBudget, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR, type BudgetCandidate } from '../utils/helpers';
-import { copyViewPoints, type PointTarget } from './viewPoints';
+import { type BudgetCandidate, clampLatLng, compareNodePriority, loadedKeysWithinBudget, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
 import { fittedCapacity, grownCapacity, initialCapacity, resizedArray } from './pointBuffers';
-
-// Register common projected coordinate systems that might not have WKT in files
-// EPSG:2180 - ETRS89 / Poland CS92 (commonly used in Poland)
-proj4.defs('EPSG:2180', '+proj=tmerc +lat_0=0 +lon_0=19 +k=0.9993 +x_0=500000 +y_0=-5300000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs');
+import { createAttributeArray, DIMENSION_CONFIGS, type PointBuffers, writeDecodedPoints } from './lazDecode';
+import { decodeLaz } from './lazDecodePool';
 
 /**
  * Source type for streaming loader - can be URL, File, or ArrayBuffer
@@ -29,81 +25,6 @@ function createBufferGetter(buffer: ArrayBuffer): Getter {
     // Then create a copy since copc.js might modify the data
     return new Uint8Array(uint8.subarray(begin, end));
   };
-}
-
-/**
- * Configuration for attribute storage types
- */
-interface AttributeConfig {
-  arrayType: 'float64' | 'float32' | 'uint32' | 'uint16' | 'uint8' | 'int32' | 'int16' | 'int8';
-}
-
-/**
- * Known LAS dimension configurations
- */
-const DIMENSION_CONFIGS: Record<string, AttributeConfig> = {
-  'GpsTime': { arrayType: 'float64' },
-  'ReturnNumber': { arrayType: 'uint8' },
-  'NumberOfReturns': { arrayType: 'uint8' },
-  'ScanDirectionFlag': { arrayType: 'uint8' },
-  'EdgeOfFlightLine': { arrayType: 'uint8' },
-  'ScanAngleRank': { arrayType: 'int8' },
-  'ScanAngle': { arrayType: 'float32' },
-  'UserData': { arrayType: 'uint8' },
-  'PointSourceId': { arrayType: 'uint16' },
-  'ScannerChannel': { arrayType: 'uint8' },
-  'Synthetic': { arrayType: 'uint8' },
-  'KeyPoint': { arrayType: 'uint8' },
-  'Withheld': { arrayType: 'uint8' },
-  'Overlap': { arrayType: 'uint8' },
-  'ClassFlags': { arrayType: 'uint8' },
-  'Nir': { arrayType: 'uint16' },
-  'NearInfrared': { arrayType: 'uint16' },
-};
-
-/**
- * Core dimensions that are handled separately
- */
-const CORE_DIMENSIONS = new Set([
-  'X', 'Y', 'Z',
-  'Intensity',
-  'Classification',
-  'Red', 'Green', 'Blue',
-]);
-
-/**
- * Creates a typed array of the appropriate type
- */
-function createAttributeArray(type: AttributeConfig['arrayType'], length: number): AttributeArray {
-  switch (type) {
-    case 'float64': return new Float64Array(length);
-    case 'float32': return new Float32Array(length);
-    case 'uint32': return new Uint32Array(length);
-    case 'uint16': return new Uint16Array(length);
-    case 'uint8': return new Uint8Array(length);
-    case 'int32': return new Int32Array(length);
-    case 'int16': return new Int16Array(length);
-    case 'int8': return new Int8Array(length);
-    default: return new Float32Array(length);
-  }
-}
-
-// LazPerf instance for COPC decompression
-let lazPerfInstance: LazPerf | null = null;
-
-export async function getLazPerf(): Promise<LazPerf> {
-  if (!lazPerfInstance) {
-    lazPerfInstance = await createLazPerf({
-      locateFile: (path: string) => {
-        // Load WASM from CDN for reliable loading in all environments
-        if (path.endsWith('.wasm')) {
-          return 'https://unpkg.com/laz-perf@0.0.7/lib/web/laz-perf.wasm';
-        }
-        return path;
-      },
-    });
-  }
-  return lazPerfInstance;
 }
 
 /**
@@ -183,7 +104,6 @@ export class CopcStreamingLoader {
   private _originalSource: StreamingSource;
   private _source: string | Getter | null = null; // URL string or Getter for buffer
   private _copc: CopcType | null = null;
-  private _lazPerf: LazPerf | null = null;
   private _options: Required<StreamingLoaderOptions>;
 
   // Hierarchy cache - loaded on-demand per page
@@ -219,6 +139,8 @@ export class CopcStreamingLoader {
 
   // Coordinate transformation
   private _transformer: ((coord: [number, number]) => [number, number]) | null = null;
+  /** proj4 definition `_transformer` was built from, for decode workers to build their own. */
+  private _projection: string | null = null;
   private _verticalUnitFactor: number = 1.0;
   private _needsTransform: boolean = false;
 
@@ -264,9 +186,6 @@ export class CopcStreamingLoader {
     hasRGB: boolean;
     spacing: number;
   }> {
-    // Initialize LazPerf for decompression
-    this._lazPerf = await getLazPerf();
-
     // Setup source - URL string or Getter for local files
     if (typeof this._originalSource === 'string') {
       // URL source
@@ -315,6 +234,7 @@ export class CopcStreamingLoader {
         const projConverter = proj4(wktToUse, 'EPSG:4326');
         this._transformer = (coord: [number, number]) =>
           projConverter.forward(coord) as [number, number];
+        this._projection = wktToUse;
         this._needsTransform = true;
         this._verticalUnitFactor = getVerticalUnitConversionFactor(this._copc.wkt);
       } catch (e) {
@@ -342,6 +262,7 @@ export class CopcStreamingLoader {
           const projConverter = proj4(detectedEPSG, 'EPSG:4326');
           this._transformer = (coord: [number, number]) =>
             projConverter.forward(coord) as [number, number];
+          this._projection = detectedEPSG;
           this._needsTransform = true;
         } catch (e) {
           console.warn(`Failed to setup coordinate transformation from ${detectedEPSG}:`, e);
@@ -1082,31 +1003,39 @@ export class CopcStreamingLoader {
         pointDataLength: node.pointDataLength,
       };
 
-      const view = await Copc.loadPointDataView(
-        this._source!,
-        this._copc!,
-        hierarchyNode,
-        { lazPerf: this._lazPerf! }
-      );
+      const compressed = await Copc.loadCompressedPointDataBuffer(this._source!, hierarchyNode);
+      const { header, eb } = this._copc!;
+      const decoded = await decodeLaz({
+        coordinateOrigin: this._coordinateOrigin,
+        projection: this._needsTransform && this._transformer ? this._projection : null,
+        verticalUnitFactor: this._verticalUnitFactor,
+        includeColors: this._colors !== null,
+        source: { kind: 'chunk', bytes: compressed, header, eb },
+        expectedPointCount: node.pointCount,
+        pointCount: node.pointCount,
+        // Until detected, ask for every extra dimension
+        extraDimensions: this._dimensionsDetected ? Object.keys(this._extraAttributes) : null,
+      });
+      if (!this._positions) {
+        // Destroyed while decoding: the buffers are gone
+        return;
+      }
 
       // Detect dimensions on first node
       if (!this._dimensionsDetected) {
-        const allDimensions = Object.keys(view.dimensions || {});
-        for (const dimName of allDimensions) {
-          if (!CORE_DIMENSIONS.has(dimName)) {
-            this._availableDimensions.add(dimName);
-            const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
-            this._extraAttributes[dimName] = createAttributeArray(
-              config.arrayType,
-              this._capacity
-            );
-          }
+        for (const dimName of Object.keys(decoded.extraAttributes)) {
+          this._availableDimensions.add(dimName);
+          const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
+          this._extraAttributes[dimName] = createAttributeArray(
+            config.arrayType,
+            this._capacity
+          );
         }
         this._dimensionsDetected = true;
       }
 
       // Extract point data into buffers (using pre-reserved startIndex)
-      copyViewPoints(view, node.pointCount, startIndex, this._pointTarget());
+      writeDecodedPoints(decoded, startIndex, this._pointBuffers());
 
       node.state = 'loaded';
       this._totalLoadedNodes++;
@@ -1135,18 +1064,15 @@ export class CopcStreamingLoader {
   }
 
   /**
-   * The buffers decoded points are copied into, and how to place points in them.
+   * The buffers decoded points are copied into.
    */
-  private _pointTarget(): PointTarget {
+  private _pointBuffers(): PointBuffers {
     return {
       positions: this._positions!,
       intensities: this._intensities!,
       classifications: this._classifications!,
       colors: this._colors,
       extraAttributes: this._extraAttributes,
-      coordinateOrigin: this._coordinateOrigin,
-      toLngLat: this._needsTransform && this._transformer ? this._transformer : null,
-      verticalUnitFactor: this._verticalUnitFactor,
     };
   }
 
