@@ -128,6 +128,13 @@ export class CopcStreamingLoader {
   // Loading state
   private _loadingQueue: CachedNode[] = [];
   private _activeRequests: number = 0;
+  /**
+   * Points of the nodes still downloading or decoding. They count against the point budget,
+   * but their buffer space is only reserved once decoded and written in the same task, so a
+   * failed load never leaves a hole beneath later nodes, and no reserved range is drawn
+   * before it is written.
+   */
+  private _unreservedPoints: number = 0;
   private _paused = false;
   /** Nodes kept by {@link loadRegion}: never evicted or reset. */
   private _pinnedKeys: Set<string> = new Set();
@@ -715,7 +722,7 @@ export class CopcStreamingLoader {
     while (
       this._loadingQueue.length > 0 &&
       this._activeRequests < this._options.maxConcurrentRequests &&
-      this._totalLoadedPoints < this._options.pointBudget
+      this._totalLoadedPoints + this._unreservedPoints < this._options.pointBudget
     ) {
       // Left queued if it doesn't fit, so it loads once the budget allows.
       const node = this._loadingQueue[0];
@@ -727,7 +734,7 @@ export class CopcStreamingLoader {
       }
 
       // Check if loading this node would exceed budget
-      if (this._totalLoadedPoints + node.pointCount > this._options.pointBudget) {
+      if (this._totalLoadedPoints + this._unreservedPoints + node.pointCount > this._options.pointBudget) {
         this._emit('budgetreached', this._getProgressEvent());
         break;
       }
@@ -988,15 +995,10 @@ export class CopcStreamingLoader {
 
     node.state = 'loading';
     this._activeRequests++;
-
-    // IMPORTANT: Reserve buffer space BEFORE async operations to prevent race conditions
-    // When multiple nodes load concurrently, each must have its own unique buffer region
-    const startIndex = this._totalLoadedPoints;
-    node.bufferStartIndex = startIndex;
-    this._totalLoadedPoints += node.pointCount; // Reserve space immediately
+    this._unreservedPoints += node.pointCount;
+    let startIndex: number | undefined;
 
     try {
-      this._ensureCapacity(this._totalLoadedPoints);
       const hierarchyNode: Hierarchy.Node = {
         pointCount: node.pointCount,
         pointDataOffset: node.pointDataOffset,
@@ -1021,6 +1023,13 @@ export class CopcStreamingLoader {
         return;
       }
 
+      // Reserve and write with no await between, so the reservation is never left unwritten
+      startIndex = this._totalLoadedPoints;
+      this._ensureCapacity(startIndex + node.pointCount);
+      node.bufferStartIndex = startIndex;
+      this._unreservedPoints -= node.pointCount;
+      this._totalLoadedPoints += node.pointCount;
+
       // Detect dimensions on first node
       if (!this._dimensionsDetected) {
         for (const dimName of Object.keys(decoded.extraAttributes)) {
@@ -1034,7 +1043,6 @@ export class CopcStreamingLoader {
         this._dimensionsDetected = true;
       }
 
-      // Extract point data into buffers (using pre-reserved startIndex)
       writeDecodedPoints(decoded, startIndex, this._pointBuffers());
 
       node.state = 'loaded';
@@ -1050,13 +1058,16 @@ export class CopcStreamingLoader {
       node.error = error instanceof Error ? error.message : String(error);
       // Give back the reserved space when it is the last reservation; any
       // other is reclaimed by the next compaction, which drops failed nodes.
-      if (startIndex + node.pointCount === this._totalLoadedPoints) {
+      if (startIndex !== undefined && startIndex + node.pointCount === this._totalLoadedPoints) {
         this._totalLoadedPoints = startIndex;
       }
       node.bufferStartIndex = undefined;
       console.warn(`Failed to load node ${node.key}:`, error);
       this._emit('error', error as Error);
     } finally {
+      if (startIndex === undefined) {
+        this._unreservedPoints -= node.pointCount;
+      }
       this._activeRequests--;
       // Continue loading more nodes
       this.loadQueuedNodes();
@@ -1234,7 +1245,8 @@ export class CopcStreamingLoader {
   setPointBudget(pointBudget: number): boolean {
     this._options.pointBudget = pointBudget;
     void this.loadQueuedNodes();
-    return this._totalLoadedPoints > pointBudget;
+    // Loading nodes reserve their points only once decoded, so count them separately.
+    return this._totalLoadedPoints + this._unreservedPoints > pointBudget;
   }
 
   /**

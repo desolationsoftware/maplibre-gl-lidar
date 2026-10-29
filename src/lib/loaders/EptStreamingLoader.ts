@@ -130,11 +130,12 @@ export class EptStreamingLoader {
    */
   private _activeFetches: number = 0;
   /**
-   * Points of the nodes still downloading. They count against the point budget, but their
-   * buffer space is only reserved once their bytes arrive, so a download that fails or is
-   * aborted never leaves a hole beneath nodes that reserved after it.
+   * Points of the nodes still downloading or decoding. They count against the point budget,
+   * but their buffer space is only reserved once decoded and written in the same task, so a
+   * failed load never leaves a hole beneath later nodes, and no reserved range is drawn
+   * before it is written.
    */
-  private _fetchingPoints: number = 0;
+  private _unreservedPoints: number = 0;
   /** In-flight node downloads, so ones the viewport has left can be abandoned. */
   private _nodeFetchControllers: Map<EptCachedNode, AbortController> = new Map();
   private _paused = false;
@@ -903,7 +904,7 @@ export class EptStreamingLoader {
     while (
       this._loadingQueue.length > 0 &&
       this._activeFetches < this._options.maxConcurrentRequests &&
-      this._totalLoadedPoints + this._fetchingPoints < this._options.pointBudget
+      this._totalLoadedPoints + this._unreservedPoints < this._options.pointBudget
     ) {
       // Left queued if it doesn't fit, so it loads once the budget allows.
       const node = this._loadingQueue[0];
@@ -914,7 +915,7 @@ export class EptStreamingLoader {
         continue;
       }
 
-      if (this._totalLoadedPoints + this._fetchingPoints + node.pointCount > this._options.pointBudget) {
+      if (this._totalLoadedPoints + this._unreservedPoints + node.pointCount > this._options.pointBudget) {
         this._emit('budgetreached', this._getProgressEvent());
         break;
       }
@@ -946,7 +947,7 @@ export class EptStreamingLoader {
     node.state = 'loading';
     this._activeRequests++;
     this._activeFetches++;
-    this._fetchingPoints += node.pointCount;
+    this._unreservedPoints += node.pointCount;
     let fetchSlotHeld = true;
     let reservedPoints = 0;
     const fetchController = new AbortController();
@@ -960,18 +961,22 @@ export class EptStreamingLoader {
       // reset away from the buffers meanwhile.
       this._releaseFetchSlot(node);
       fetchSlotHeld = false;
+      this.loadQueuedNodes();
 
+      const decoded = this._metadata?.dataType === 'laszip'
+        ? await this._decodeLazNode(buffer, node)
+        : null;
+
+      // Reserve and write with no await between, so the reservation is never left unwritten
       const startIndex = this._totalLoadedPoints;
       this._ensureCapacity(startIndex + node.pointCount);
       node.bufferStartIndex = startIndex;
       reservedPoints = node.pointCount;
+      this._unreservedPoints -= reservedPoints;
       this._totalLoadedPoints += reservedPoints;
 
-      this.loadQueuedNodes();
-
-      if (this._metadata?.dataType === 'laszip') {
-        // Use copc.js to decompress LAZ files
-        await this._decodeLazNode(buffer, node, startIndex);
+      if (decoded) {
+        this._writeLazNode(decoded, startIndex);
       } else {
         // Binary format - parse directly
         this._decodeBinaryNode(buffer, node, startIndex);
@@ -1032,6 +1037,9 @@ export class EptStreamingLoader {
       if (fetchSlotHeld) {
         this._releaseFetchSlot(node);
       }
+      if (reservedPoints === 0) {
+        this._unreservedPoints -= node.pointCount;
+      }
       this._activeRequests--;
       if (!this._abort.signal.aborted) {
         this._reclaimFailedReservations();
@@ -1081,7 +1089,6 @@ export class EptStreamingLoader {
    */
   private _releaseFetchSlot(node: EptCachedNode): void {
     this._activeFetches--;
-    this._fetchingPoints -= node.pointCount;
     this._nodeFetchControllers.delete(node);
   }
 
@@ -1105,13 +1112,9 @@ export class EptStreamingLoader {
    *
    * @param buffer - The LAZ file's bytes
    * @param node - Node being loaded
-   * @param startIndex - Starting index in buffers
+   * @returns The decoded points
    */
-  private async _decodeLazNode(
-    buffer: ArrayBuffer,
-    node: EptCachedNode,
-    startIndex: number
-  ): Promise<void> {
+  private async _decodeLazNode(buffer: ArrayBuffer, node: EptCachedNode): Promise<PointBuffers> {
     const decoded = await decodeLaz({
       projection: this._needsTransform && this._transformer ? this._projection : null,
       coordinateOrigin: this._coordinateOrigin,
@@ -1119,7 +1122,7 @@ export class EptStreamingLoader {
       includeColors: this._colors !== null,
       source: { kind: 'file', bytes: new Uint8Array(buffer) },
       expectedPointCount: node.pointCount,
-      pointCount: Math.min(node.pointCount, this._capacity - startIndex),
+      pointCount: node.pointCount,
       // Until detected, ask for every extra dimension the EPT schema lists
       extraDimensions: this._dimensionsDetected
         ? Object.keys(this._extraAttributes)
@@ -1128,7 +1131,16 @@ export class EptStreamingLoader {
     if (this._abort.signal.aborted) {
       throw new Error(`Destroyed while decoding EPT node ${node.key}`);
     }
+    return decoded;
+  }
 
+  /**
+   * Copies a decoded LAZ node's points into the buffers.
+   *
+   * @param decoded - The decoded points
+   * @param startIndex - Starting index in buffers
+   */
+  private _writeLazNode(decoded: PointBuffers, startIndex: number): void {
     // Detect extra dimensions on first node, keeping only those the EPT schema lists
     if (!this._dimensionsDetected) {
       for (const dimName of Object.keys(decoded.extraAttributes)) {
@@ -1454,8 +1466,8 @@ export class EptStreamingLoader {
   setPointBudget(pointBudget: number): boolean {
     this._options.pointBudget = pointBudget;
     void this.loadQueuedNodes();
-    // Downloads reserve their points only once they arrive, so count them separately.
-    return this._totalLoadedPoints + this._fetchingPoints > pointBudget;
+    // Loading nodes reserve their points only once decoded, so count them separately.
+    return this._totalLoadedPoints + this._unreservedPoints > pointBudget;
   }
 
   /**
