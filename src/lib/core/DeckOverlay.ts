@@ -170,7 +170,7 @@ export class DeckOverlay {
     } catch {
       // Ignore errors if already removed
     }
-    // In overlaid moe, MapLibre detaches a control's element for it, but only from the corner
+    // In overlaid mode, MapLibre detaches a control's element for it, but only from the corner
     // container it put it in; the canvas wrapper now lives elsewhere, so drop
     // it here rather than leaving a dead canvas over the map.
     this._container?.remove();
