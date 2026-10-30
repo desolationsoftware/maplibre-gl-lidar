@@ -386,6 +386,11 @@ export interface LidarControlOptions {
    * The tile pyramid tile mode loads from. Setting `url` makes tile mode available.
    */
   tileSource?: TilePointCloudSourceOptions;
+
+  /**
+   * Whether the deck.gl overlay should be drawn in interleaved or overlaid mode
+   */
+  interleaved?: boolean;
 }
 
 /**

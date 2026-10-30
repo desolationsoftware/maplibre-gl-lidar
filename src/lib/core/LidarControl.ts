@@ -68,6 +68,7 @@ const DEFAULT_OPTIONS: Required<Omit<LidarControlOptions, 'pickInfoFields' | 'co
   closeOnOutsideClick: true,
   tileMode: false,
   tileSource: {},
+  interleaved: false,
 };
 
 /**
@@ -227,7 +228,7 @@ export class LidarControl implements IControl {
     this._mapContainer = map.getContainer();
 
     // Initialize deck.gl overlay
-    this._deckOverlay = new DeckOverlay(map);
+    this._deckOverlay = new DeckOverlay(map, this._options.interleaved);
 
     // Initialize point cloud manager
     this._pointCloudManager = new PointCloudManager(this._deckOverlay, {
@@ -3435,7 +3436,7 @@ export class LidarControl implements IControl {
 
     // Initialize cross-section tool if needed
     if (!this._crossSectionTool && this._deckOverlay) {
-      this._crossSectionTool = new CrossSectionTool(this._map, this._deckOverlay);
+      this._crossSectionTool = new CrossSectionTool(this._map, this._deckOverlay, this._options.interleaved);
       this._crossSectionTool.setOnLineChange((line) => {
         this._handleCrossSectionLineChange(line);
       });
