@@ -16,6 +16,7 @@ export class CrossSectionTool {
   private _startPoint: [number, number] | null = null;
   private _endPoint: [number, number] | null = null;
   private _bufferDistance: number = 10; // meters
+  private _interleaved: boolean;
 
   // deck.gl layer ID
   private readonly LAYER_ID = 'lidar-cross-section-layer';
@@ -33,9 +34,10 @@ export class CrossSectionTool {
    * @param map - MapLibre map instance
    * @param deckOverlay - DeckOverlay instance for rendering
    */
-  constructor(map: MapLibreMap, deckOverlay: DeckOverlay) {
+  constructor(map: MapLibreMap, deckOverlay: DeckOverlay, interleaved: boolean) {
     this._map = map;
     this._deckOverlay = deckOverlay;
+    this._interleaved = interleaved;
     this._handleClickBound = this._handleClick.bind(this);
     this._handleMouseMoveBound = this._handleMouseMove.bind(this);
   }
@@ -267,9 +269,12 @@ export class CrossSectionTool {
       stroked: true,
       filled: true,
       // Disable depth testing so this layer renders on top of points and terrain
-      parameters: {
+      parameters: interleaved ? {
         depthCompare: 'always',
         depthWriteEnabled: false,
+      } : {
+        depthTest: false,
+        depthMask: false,
       },
       // Fill color for polygons (buffer) and points
       getFillColor: (f: GeoJSON.Feature) => {

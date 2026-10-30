@@ -3436,7 +3436,7 @@ export class LidarControl implements IControl {
 
     // Initialize cross-section tool if needed
     if (!this._crossSectionTool && this._deckOverlay) {
-      this._crossSectionTool = new CrossSectionTool(this._map, this._deckOverlay);
+      this._crossSectionTool = new CrossSectionTool(this._map, this._deckOverlay, this._options.interleaved);
       this._crossSectionTool.setOnLineChange((line) => {
         this._handleCrossSectionLineChange(line);
       });
