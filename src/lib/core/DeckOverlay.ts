@@ -15,18 +15,19 @@ export class DeckOverlay {
   private _layers: Map<string, Layer>;
   /** Layers drawn after every other one (see {@link addLayer}). */
   private _overlayIds: Set<string> = new Set();
-  /** The deck.gl canvas wrapper, re-parented out of the control container. */
+  /** Interleaved mode: The placeholder element MapLibreOverlay hands MapLibre as its control. */
+  /** Overlaid mode: The deck.gl canvas wrapper, re-parented out of the control container. */
   private _container: HTMLDivElement | null = null;
 
-  constructor(map: MapLibreMap) {
+  constructor(map: MapLibreMap, interleaved: boolean) {
     this._map = map;
     this._layers = new Map();
     this._overlay = new MapLibreOverlay({
-      interleaved: false, // Use non-interleaved mode for better compatibility
+      interleaved: interleaved,
       layers: [],
     });
     // MapLibreOverlay implements MapLibre's IControl, so no cast is needed.
-    // Capture the element it hands back: MapLibre drops it into one of the four
+    // Capture the element it hands back: In overlaid mode, MapLibre drops it into one of the four
     // corner containers, which is the wrong place for it (see _moveBelowUi).
     const onAdd = this._overlay.onAdd.bind(this._overlay);
     this._overlay.onAdd = (addedTo) => {
@@ -34,7 +35,9 @@ export class DeckOverlay {
       return this._container;
     };
     this._map.addControl(this._overlay);
-    this._moveBelowUi();
+    if (!interleaved) {
+      this._moveBelowUi();
+    }
   }
 
   /**
@@ -167,7 +170,7 @@ export class DeckOverlay {
     } catch {
       // Ignore errors if already removed
     }
-    // MapLibre detaches a control's element for it, but only from the corner
+    // In overlaid moe, MapLibre detaches a control's element for it, but only from the corner
     // container it put it in; the canvas wrapper now lives elsewhere, so drop
     // it here rather than leaving a dead canvas over the map.
     this._container?.remove();

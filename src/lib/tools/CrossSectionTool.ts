@@ -260,17 +260,16 @@ export class CrossSectionTool {
     };
 
     // Create deck.gl GeoJsonLayer with styling for all feature types
-    // Use parameters.depthTest: false to ensure it renders on top of point clouds
     const layer = new GeoJsonLayer({
       id: this.LAYER_ID,
       data: geojsonData,
       pickable: false,
       stroked: true,
       filled: true,
-      // Disable depth testing so this layer always renders on top
+      // Disable depth testing so this layer renders on top of points and terrain
       parameters: {
-        depthTest: false,
-        depthMask: false,
+        depthCompare: 'always',
+        depthWriteEnabled: false,
       },
       // Fill color for polygons (buffer) and points
       getFillColor: (f: GeoJSON.Feature) => {
