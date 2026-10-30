@@ -13,6 +13,13 @@ const MISSING_ATTRIBUTE_COLOR: RGBColor = [ 128, 128, 128 ];
 const ATTRIBUTE_OPTION_PREFIX = 'attr:';
 
 /**
+ * How far, as a fraction of their range, gradient color bounds may move before points that
+ * already have colors are recolored. Bounds from a growing point cloud shift a little with
+ * every update, and recoloring every point for that is what makes updates slow.
+ */
+const BOUNDS_REUSE_TOLERANCE = 0.01;
+
+/**
  * ASPRS LAS classification standard colors
  */
 export const CLASSIFICATION_COLORS: ClassificationColorMap = {
@@ -83,7 +90,24 @@ export interface ColorResult {
   bounds?: { min: number; max: number };
   /** Full range of the colored values, before any color range or percentile clipping */
   dataBounds?: { min: number; max: number };
+  /** First point whose color was written; the colors of earlier points were kept */
+  start: number;
 }
+
+/**
+ * Colors computed earlier for the same point cloud, so only points from `start` need coloring.
+ */
+export interface ColorReuse {
+  /** Colors of the points before `start`. Written in place, so it must fit every point. */
+  colors: Uint8Array;
+  /** First point needing a color */
+  start: number;
+  /** Bounds the existing colors were computed with */
+  bounds?: { min: number; max: number };
+}
+
+/** Where coloring starts, and the bounds the colors before it were computed with */
+type ColorStart = Pick<ColorReuse, 'start' | 'bounds'>;
 
 /**
  * Processes point cloud data into color arrays based on color scheme.
@@ -113,10 +137,17 @@ export class ColorSchemeProcessor {
    * @param data - Point cloud data
    * @param scheme - Color scheme to apply
    * @param options - Optional color generation options
+   * @param reuse - Colors from an earlier call for the same point cloud, to color only newer points
    * @returns ColorResult containing colors and computed bounds
    */
-  getColorsWithBounds(data: PointCloudData, scheme: ColorScheme, options: ColorOptions = {}): ColorResult {
-    const colors = new Uint8Array(data.pointCount * 4);
+  getColorsWithBounds(
+    data: PointCloudData,
+    scheme: ColorScheme,
+    options: ColorOptions = {},
+    reuse?: ColorReuse
+  ): ColorResult {
+    const colors = reuse?.colors ?? new Uint8Array(data.pointCount * 4);
+    const from: ColorStart = { start: reuse?.start ?? 0, bounds: reuse?.bounds };
     const colormap = options.colormap ?? 'viridis';
     const colorRange = options.colorRange;
     const usePercentile = options.usePercentile ?? true;
@@ -124,25 +155,24 @@ export class ColorSchemeProcessor {
     if (typeof scheme === 'string') {
       switch (scheme) {
         case 'elevation':
-          return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
+          return this._colorByElevation(data, colors, from, colormap, colorRange, usePercentile);
         case 'intensity':
-          return this._colorByIntensity(data, colors, colormap, colorRange, usePercentile);
+          return this._colorByIntensity(data, colors, from, colormap, colorRange, usePercentile);
         case 'classification':
-          return {
-            colors: this._colorByClassification(
-              data,
-              colors,
-              options.hiddenClassifications,
-              options.classificationStyles
-            ),
-          };
+          return this._colorByClassification(
+            data,
+            colors,
+            from,
+            options.hiddenClassifications,
+            options.classificationStyles
+          );
         case 'rgb':
-          return { colors: this._colorByRGB(data, colors) };
+          return this._colorByRGB(data, colors, from);
         default:
-          return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
+          return this._colorByElevation(data, colors, from, colormap, colorRange, usePercentile);
       }
     } else {
-      return this._colorByCustom(data, colors, scheme, colormap, colorRange, usePercentile);
+      return this._colorByCustom(data, colors, from, scheme, colormap, colorRange, usePercentile);
     }
   }
 
@@ -196,6 +226,7 @@ export class ColorSchemeProcessor {
    *
    * @param data - Point cloud data
    * @param colors - Output color array
+   * @param from - Where coloring starts
    * @param colormap - Colormap name to use
    * @param colorRange - Color range configuration
    * @param usePercentile - Legacy percentile flag
@@ -204,13 +235,14 @@ export class ColorSchemeProcessor {
   private _colorByElevation(
     data: PointCloudData,
     colors: Uint8Array,
+    from: ColorStart,
     colormap: ColormapName,
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean
   ): ColorResult {
     // Guard against missing positions
     if (!data.positions || data.positions.length === 0) {
-      return { colors };
+      return { colors, start: from.start };
     }
 
     // Extract Z values
@@ -223,7 +255,7 @@ export class ColorSchemeProcessor {
     };
 
     const ramp = COLORMAPS[colormap] || COLORMAPS.viridis;
-    return this._colorByValues(data, colors, zValues, ramp, colorRange, usePercentile, dataBounds);
+    return this._colorByValues(data, colors, from, zValues, ramp, colorRange, usePercentile, dataBounds);
   }
 
   /**
@@ -231,6 +263,7 @@ export class ColorSchemeProcessor {
    *
    * @param data - Point cloud data
    * @param colors - Output color array
+   * @param from - Where coloring starts
    * @param colormap - Colormap name to use
    * @param colorRange - Color range configuration
    * @param usePercentile - Legacy percentile flag
@@ -239,17 +272,18 @@ export class ColorSchemeProcessor {
   private _colorByIntensity(
     data: PointCloudData,
     colors: Uint8Array,
+    from: ColorStart,
     colormap: ColormapName,
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean
   ): ColorResult {
     if (!data.hasIntensity || !data.intensities) {
       // Fall back to elevation if no intensity data
-      return this._colorByElevation(data, colors, colormap, colorRange, usePercentile);
+      return this._colorByElevation(data, colors, from, colormap, colorRange, usePercentile);
     }
 
     const ramp = COLORMAPS[colormap] || COLORMAPS.gray;
-    return this._colorByValues(data, colors, data.intensities, ramp, colorRange, usePercentile);
+    return this._colorByValues(data, colors, from, data.intensities, ramp, colorRange, usePercentile);
   }
 
   /**
@@ -257,22 +291,24 @@ export class ColorSchemeProcessor {
    *
    * @param data - Point cloud data
    * @param colors - Output color array
+   * @param from - Where coloring starts
    * @param hiddenClassifications - Optional set of classification codes to hide (alpha=0)
-   * @returns Color array
+   * @returns ColorResult with colors
    */
   private _colorByClassification(
     data: PointCloudData,
     colors: Uint8Array,
+    from: ColorStart,
     hiddenClassifications?: Set<number>,
     styles?: ClassificationStyles
-  ): Uint8Array {
+  ): ColorResult {
     if (!data.hasClassification || !data.classifications) {
       // Fall back to elevation if no classification data
-      const result = this._colorByElevation(data, colors, 'viridis', undefined, true);
-      return result.colors;
+      const result = this._colorByElevation(data, colors, from, 'viridis', undefined, true);
+      return { colors: result.colors, start: result.start };
     }
 
-    for (let i = 0; i < data.pointCount; i++) {
+    for (let i = from.start; i < data.pointCount; i++) {
       const cls = data.classifications[i];
       const color = getClassificationColor(cls, styles);
       colors[i * 4] = color[0];
@@ -281,7 +317,7 @@ export class ColorSchemeProcessor {
       // Set alpha to 0 if classification is hidden, otherwise 255
       colors[i * 4 + 3] = hiddenClassifications?.has(cls) ? 0 : 255;
     }
-    return colors;
+    return { colors, start: from.start };
   }
 
   /**
@@ -289,23 +325,24 @@ export class ColorSchemeProcessor {
    *
    * @param data - Point cloud data
    * @param colors - Output color array
-   * @returns Color array
+   * @param from - Where coloring starts
+   * @returns ColorResult with colors
    */
-  private _colorByRGB(data: PointCloudData, colors: Uint8Array): Uint8Array {
+  private _colorByRGB(data: PointCloudData, colors: Uint8Array, from: ColorStart): ColorResult {
     if (!data.hasRGB || !data.colors) {
       // Fall back to elevation if no RGB data
-      const result = this._colorByElevation(data, colors, 'viridis', undefined, true);
-      return result.colors;
+      const result = this._colorByElevation(data, colors, from, 'viridis', undefined, true);
+      return { colors: result.colors, start: result.start };
     }
 
     // data.colors is stored as RGBA (4 bytes per point)
-    for (let i = 0; i < data.pointCount; i++) {
+    for (let i = from.start; i < data.pointCount; i++) {
       colors[i * 4] = data.colors[i * 4];
       colors[i * 4 + 1] = data.colors[i * 4 + 1];
       colors[i * 4 + 2] = data.colors[i * 4 + 2];
       colors[i * 4 + 3] = 255;
     }
-    return colors;
+    return { colors, start: from.start };
   }
 
   /**
@@ -317,6 +354,7 @@ export class ColorSchemeProcessor {
    *
    * @param data - Point cloud data
    * @param colors - Output color array
+   * @param from - Where coloring starts
    * @param config - Custom color scheme config
    * @param colormap - Colormap name to use when the config has no colors
    * @param colorRange - Color range configuration
@@ -326,6 +364,7 @@ export class ColorSchemeProcessor {
   private _colorByCustom(
     data: PointCloudData,
     colors: Uint8Array,
+    from: ColorStart,
     config: ColorSchemeConfig,
     colormap: ColormapName,
     colorRange?: ColorRangeConfig,
@@ -343,18 +382,20 @@ export class ColorSchemeProcessor {
       // This point cloud lacks the attribute (or has only no-data values). Draw
       // it in a neutral color, with no bounds, so it isn't mistaken for colored
       // data and the colorbar keeps the range of a cloud that has the attribute.
-      for (let i = 0; i < data.pointCount; i++) {
+      // Points before `from.start` were colored by the attribute if they had bounds.
+      const start = from.bounds ? 0 : from.start;
+      for (let i = start; i < data.pointCount; i++) {
         colors[i * 4] = MISSING_ATTRIBUTE_COLOR[0];
         colors[i * 4 + 1] = MISSING_ATTRIBUTE_COLOR[1];
         colors[i * 4 + 2] = MISSING_ATTRIBUTE_COLOR[2];
         colors[i * 4 + 3] = 255;
       }
-      return { colors };
+      return { colors, start };
     }
 
     const ramp = getCustomColorRamp(config) ?? COLORMAPS[colormap] ?? COLORMAPS.viridis;
     const domain = config.domain ? { min: config.domain[0], max: config.domain[1] } : valueBounds;
-    return this._colorByValues(data, colors, values, ramp, colorRange, usePercentile, domain);
+    return this._colorByValues(data, colors, from, values, ramp, colorRange, usePercentile, domain);
   }
 
   /**
@@ -363,6 +404,8 @@ export class ColorSchemeProcessor {
    *
    * @param data - Point cloud data
    * @param colors - Output color array
+   * @param from - Where coloring starts. Coloring starts at 0 instead when the bounds have
+   *   moved too far from the ones the earlier points were colored with.
    * @param values - Per-point values (length = data.pointCount)
    * @param ramp - Color ramp to interpolate
    * @param colorRange - Color range configuration
@@ -373,42 +416,56 @@ export class ColorSchemeProcessor {
   private _colorByValues(
     data: PointCloudData,
     colors: Uint8Array,
+    from: ColorStart,
     values: ArrayLike<number>,
     ramp: ColorRamp,
     colorRange?: ColorRangeConfig,
     usePercentile?: boolean,
     dataBounds: { min: number; max: number } = computeValueBounds(values, data.pointCount) ?? { min: 0, max: 1 },
   ): ColorResult {
-    // Compute color bounds based on configuration
-    const bounds = this._computeBounds(values, dataBounds, colorRange, usePercentile);
+    // Compute color bounds based on configuration, keeping the earlier points' bounds
+    // while they're close enough that those points needn't be recolored
+    let bounds = this._computeBounds(values, dataBounds, colorRange, usePercentile);
+    let start = 0;
+    if (from.start > 0 && from.bounds && boundsWithinTolerance(from.bounds, bounds)) {
+      bounds = from.bounds;
+      start = from.start;
+    }
     this._lastComputedBounds = bounds;
 
     const { min, max } = bounds;
     const range = max - min || 1;
 
-    for (let i = 0; i < data.pointCount; i++) {
+    for (let i = start; i < data.pointCount; i++) {
       const value = values[i];
-      const color = Number.isNaN(value) ? MISSING_ATTRIBUTE_COLOR : this._interpolateRamp(ramp, (value - min) / range);
-      colors[i * 4] = color[0];
-      colors[i * 4 + 1] = color[1];
-      colors[i * 4 + 2] = color[2];
+      if (Number.isNaN(value)) {
+        colors[i * 4] = MISSING_ATTRIBUTE_COLOR[0];
+        colors[i * 4 + 1] = MISSING_ATTRIBUTE_COLOR[1];
+        colors[i * 4 + 2] = MISSING_ATTRIBUTE_COLOR[2];
+      } else {
+        this._writeRampColor(ramp, (value - min) / range, colors, i * 4);
+      }
       colors[i * 4 + 3] = 255;
     }
 
-    return { colors, bounds, dataBounds };
+    return { colors, bounds, dataBounds, start };
   }
 
   /**
-   * Interpolates a color from a color ramp.
+   * Interpolates a color from a color ramp, writing it to `colors` rather than allocating one.
    *
    * @param ramp - Color ramp array
    * @param t - Interpolation parameter (0-1)
-   * @returns Interpolated RGB color
+   * @param colors - Color array to write the RGB components to
+   * @param offset - Index in `colors` of the red component
    */
-  private _interpolateRamp(ramp: ColorRamp, t: number): RGBColor {
+  private _writeRampColor(ramp: ColorRamp, t: number, colors: Uint8Array, offset: number): void {
     // Handle NaN or invalid t values
     if (!Number.isFinite(t)) {
-      return ramp[0];
+      colors[offset] = ramp[0][0];
+      colors[offset + 1] = ramp[0][1];
+      colors[offset + 2] = ramp[0][2];
+      return;
     }
 
     const clampedT = Math.max(0, Math.min(1, t));
@@ -417,12 +474,12 @@ export class ColorSchemeProcessor {
       ramp.length - 2
     );
     const localT = clampedT * (ramp.length - 1) - idx;
+    const low = ramp[idx];
+    const high = ramp[idx + 1];
 
-    return [
-      Math.round(ramp[idx][0] + (ramp[idx + 1][0] - ramp[idx][0]) * localT),
-      Math.round(ramp[idx][1] + (ramp[idx + 1][1] - ramp[idx][1]) * localT),
-      Math.round(ramp[idx][2] + (ramp[idx + 1][2] - ramp[idx][2]) * localT),
-    ];
+    colors[offset] = Math.round(low[0] + (high[0] - low[0]) * localT);
+    colors[offset + 1] = Math.round(low[1] + (high[1] - low[1]) * localT);
+    colors[offset + 2] = Math.round(low[2] + (high[2] - low[2]) * localT);
   }
 }
 
@@ -460,12 +517,13 @@ export function getClassificationName(code: number, styles?: ClassificationStyle
  * Extracts the set of unique classification codes present in the point cloud data.
  *
  * @param data - Point cloud data
+ * @param start - First point to look at
  * @returns Set of classification codes found in the data
  */
-export function getAvailableClassifications(data: PointCloudData): Set<number> {
+export function getAvailableClassifications(data: PointCloudData, start: number = 0): Set<number> {
   const classifications = new Set<number>();
   if (data.hasClassification && data.classifications) {
-    for (let i = 0; i < data.pointCount; i++) {
+    for (let i = start; i < data.pointCount; i++) {
       classifications.add(data.classifications[i]);
     }
   }
@@ -575,6 +633,14 @@ export function getSchemeFilterValues(data: PointCloudData, scheme: ColorScheme)
  */
 export function getCustomColorRamp(scheme: ColorScheme): ColorRamp | undefined {
   return typeof scheme === 'string' ? undefined : parseColorRamp(scheme.colors);
+}
+
+/**
+ * Whether `next` bounds are within {@link BOUNDS_REUSE_TOLERANCE} of `previous` ones.
+ */
+function boundsWithinTolerance(previous: { min: number; max: number }, next: { min: number; max: number }): boolean {
+  const tolerance = (previous.max - previous.min) * BOUNDS_REUSE_TOLERANCE;
+  return Math.abs(next.min - previous.min) <= tolerance && Math.abs(next.max - previous.max) <= tolerance;
 }
 
 /**

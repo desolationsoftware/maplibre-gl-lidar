@@ -101,6 +101,13 @@ export interface PointCloudData {
    * (e.g. space reserved for a node still loading) hold no real point.
    */
   nodeRanges?: PointNodeRange[];
+
+  /**
+   * For data a loader streams into the same buffers: the first point that may differ from
+   * the loader's previous update. Earlier points are unchanged. Unset when every point may
+   * have changed.
+   */
+  changedFrom?: number;
 }
 
 /**

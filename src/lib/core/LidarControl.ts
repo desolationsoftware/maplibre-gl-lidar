@@ -1060,8 +1060,9 @@ export class LidarControl implements IControl {
           autoZOffsetApplied = true;
         }
 
-        // Extract and merge classifications from streamed data
-        const newClassifications = getAvailableClassifications(data);
+        // Extract and merge classifications from streamed data. Earlier points' classes were
+        // merged by earlier updates.
+        const newClassifications = getAvailableClassifications(data, data.changedFrom);
         if (newClassifications.size > 0) {
           const mergedClassifications = new Set([
             ...this._state.availableClassifications,
@@ -1309,8 +1310,9 @@ export class LidarControl implements IControl {
           autoZOffsetApplied = true;
         }
 
-        // Extract and merge classifications
-        const newClassifications = getAvailableClassifications(data);
+        // Extract and merge classifications. Earlier points' classes were merged by earlier
+        // updates.
+        const newClassifications = getAvailableClassifications(data, data.changedFrom);
         if (newClassifications.size > 0) {
           const mergedClassifications = new Set([
             ...this._state.availableClassifications,

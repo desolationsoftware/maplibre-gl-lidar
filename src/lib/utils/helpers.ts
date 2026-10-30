@@ -275,35 +275,44 @@ export function computePercentile(
   percentile: number,
   maxSamples: number = 100000
 ): number {
-  // Sample the array if it's too large (stratified sampling for better
-  // representation), skipping NaN
+  const sorted = sortedSample(arr, maxSamples);
+  return sorted.length === 0 ? 0 : percentileOfSorted(sorted, percentile);
+}
+
+/**
+ * Samples up to `maxSamples` values, evenly spaced (stratified sampling for better
+ * representation), skipping NaN, and sorts them.
+ */
+function sortedSample(arr: ArrayLike<number>, maxSamples: number): Float64Array {
   const count = Math.min(arr.length, maxSamples);
   const step = arr.length / count;
-  const values: number[] = [];
+  const values = new Float64Array(count);
+  let length = 0;
   for (let i = 0; i < count; i++) {
     const value = arr[Math.floor(i * step)];
     if (!Number.isNaN(value)) {
-      values.push(value);
+      values[length++] = value;
     }
   }
-  if (values.length === 0) return 0;
+  // A typed array sorts numerically without a comparator, much faster than an array of numbers
+  return values.subarray(0, length).sort();
+}
 
-  // Sort the sampled values
-  values.sort((a, b) => a - b);
-
-  // Compute the index for the percentile
-  const p = percentile / 100;
-  const index = p * (values.length - 1);
+/**
+ * The value at `percentile` (0-100) of non-empty sorted values, interpolating linearly between
+ * the two closest values.
+ */
+function percentileOfSorted(sorted: Float64Array, percentile: number): number {
+  const index = (percentile / 100) * (sorted.length - 1);
   const lower = Math.floor(index);
   const upper = Math.ceil(index);
 
   if (lower === upper) {
-    return values[lower];
+    return sorted[lower];
   }
 
-  // Linear interpolation between the two closest values
   const fraction = index - lower;
-  return values[lower] * (1 - fraction) + values[upper] * fraction;
+  return sorted[lower] * (1 - fraction) + sorted[upper] * fraction;
 }
 
 /**
@@ -321,8 +330,10 @@ export function computePercentileBounds(
 ): { min: number; max: number } {
   if (arr.length === 0) return { min: 0, max: 1 };
 
-  const min = computePercentile(arr, lowerPercentile);
-  const max = computePercentile(arr, upperPercentile);
+  // Both percentiles come from the same sample, so it's only sorted once
+  const sorted = sortedSample(arr, 100000);
+  const min = sorted.length === 0 ? 0 : percentileOfSorted(sorted, lowerPercentile);
+  const max = sorted.length === 0 ? 0 : percentileOfSorted(sorted, upperPercentile);
 
   // Ensure we have a valid range
   if (min === max) {
