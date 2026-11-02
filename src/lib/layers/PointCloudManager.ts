@@ -229,11 +229,6 @@ export class PointCloudManager {
       // Recolored points need their layers rebuilt too, and every layer does once the
       // loader reallocates its buffers, so none keeps rendering from the old ones
       const sameBuffers = data.positions.buffer === existing.data.positions?.buffer;
-      console.log(
-        `${id}: points ${existing.data.pointCount} -> ${data.pointCount}, changedFrom ${data.changedFrom}, ` +
-          `colored from ${result.start}, sameBuffers ${sameBuffers}, ` +
-          `bounds ${JSON.stringify(existing.colorBounds)} -> ${JSON.stringify(result.bounds)}`
-      );
       this._createLayer(id, sameBuffers ? result.start : 0);
     } else {
       // New point cloud - use existing addPointCloud
@@ -718,8 +713,6 @@ export class PointCloudManager {
     ];
 
     const chunkData: ChunkLayerData[] = [];
-    let remadeChunks = 0;
-    let unchangedChunks = 0;
     for (let chunk = 0; chunk < numChunks; chunk++) {
       const chunkStart = chunk * CHUNK_SIZE;
       const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, visibleCount);
@@ -734,16 +727,13 @@ export class PointCloudManager {
       const previous = pc.chunkData[chunk];
       let layerData: ChunkLayerData;
       if (filteredIndices == null && chunkEnd <= changedFrom && previous?.length === chunkSize) {
-        unchangedChunks += 1;
         layerData = previous;
       } else if (filteredIndices == null) {
-        remadeChunks += 1;
         layerData = createChunkLayerData(
           data.positions.subarray(chunkStart * 3, chunkEnd * 3),
           colors.subarray(chunkStart * 4, chunkEnd * 4)
         );
       } else {
-        remadeChunks += 1;
         const chunkPositions = new Float32Array(chunkSize * 3);
         const chunkColors = new Uint8Array(chunkSize * 4);
         for (let i = 0; i < chunkSize; i++) {
@@ -846,10 +836,6 @@ export class PointCloudManager {
 
     this._removeChunkLayers(id, numChunks, pc.chunkData.length);
     this._pointClouds.set(id, { ...pc, chunkData });
-    console.log(
-      `${id}: TOTAL CHUNKS ${numChunks}, SKIPPED ${unchangedChunks} chunks, REMADE ${remadeChunks} CHUNKS, ` +
-        `changedFrom ${changedFrom}, filtered ${filteredIndices != null}`
-    );
   }
 
   /**
