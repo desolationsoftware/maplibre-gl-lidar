@@ -31,6 +31,13 @@ function pointSizeMeters(
 const CHUNK_SIZE = 1000000;
 
 /**
+ * Number of chunk layers `pointCount` points are split into.
+ */
+function chunkCount(pointCount: number): number {
+  return Math.ceil(pointCount / CHUNK_SIZE);
+}
+
+/**
  * `colors` when it holds at least `length` bytes, otherwise a larger array with its first `keep`
  * bytes. Grows by half again, so the colors of a streamed cloud aren't reallocated every update.
  */
@@ -58,8 +65,8 @@ interface ManagedPointCloud {
   visible: boolean;
   /** Per-layer opacity override (null means use global) */
   opacityOverride: number | null;
-  /** Point counts of the deck.gl chunk layers currently created for this point cloud */
-  chunkSizes: number[];
+  /** Number of points split among the deck.gl chunk layers currently created for this point cloud */
+  layerPointCount: number;
   /** Full range of the gradient-colored values, if the current scheme yielded one */
   dataBounds?: { min: number; max: number };
 }
@@ -137,7 +144,7 @@ export class PointCloudManager {
       coordinateOrigin,
       visible: true,
       opacityOverride: null,
-      chunkSizes: [],
+      layerPointCount: 0,
       dataBounds: result.dataBounds,
     });
     this._createLayer(id);
@@ -162,7 +169,7 @@ export class PointCloudManager {
           coordinateOrigin: data.coordinateOrigin,
           visible: existing.visible,
           opacityOverride: existing.opacityOverride,
-          chunkSizes: existing.chunkSizes,
+          layerPointCount: existing.layerPointCount,
         });
         this._createLayer(id);
       }
@@ -198,7 +205,7 @@ export class PointCloudManager {
         coordinateOrigin: data.coordinateOrigin,
         visible: existing.visible,
         opacityOverride: existing.opacityOverride,
-        chunkSizes: existing.chunkSizes,
+        layerPointCount: existing.layerPointCount,
         dataBounds: result.dataBounds,
       });
 
@@ -230,7 +237,7 @@ export class PointCloudManager {
   removePointCloud(id: string): void {
     const pc = this._pointClouds.get(id);
     if (pc) {
-      this._removeChunkLayers(id, 0, pc.chunkSizes.length);
+      this._removeChunkLayers(id, 0, chunkCount(pc.layerPointCount));
     }
     this._pointClouds.delete(id);
   }
@@ -486,7 +493,7 @@ export class PointCloudManager {
    */
   clear(): void {
     for (const [id, pc] of this._pointClouds) {
-      this._removeChunkLayers(id, 0, pc.chunkSizes.length);
+      this._removeChunkLayers(id, 0, chunkCount(pc.layerPointCount));
     }
     this._pointClouds.clear();
   }
@@ -639,8 +646,8 @@ export class PointCloudManager {
 
     // If layer is not visible, don't create any layers
     if (!visible) {
-      this._removeChunkLayers(id, 0, pc.chunkSizes.length);
-      this._pointClouds.set(id, { ...pc, chunkSizes: [] });
+      this._removeChunkLayers(id, 0, chunkCount(pc.layerPointCount));
+      this._pointClouds.set(id, { ...pc, layerPointCount: 0 });
       return;
     }
 
@@ -671,13 +678,12 @@ export class PointCloudManager {
 
     // If no points pass the filter, don't create any layers
     if (visibleCount === 0) {
-      this._removeChunkLayers(id, 0, pc.chunkSizes.length);
-      this._pointClouds.set(id, { ...pc, chunkSizes: [] });
+      this._removeChunkLayers(id, 0, chunkCount(pc.layerPointCount));
+      this._pointClouds.set(id, { ...pc, layerPointCount: 0 });
       return;
     }
 
-    const numChunks = Math.ceil(visibleCount / CHUNK_SIZE);
-    const chunkSizes: number[] = [];
+    const numChunks = chunkCount(visibleCount);
     // The Z offset is applied through the origin, so unfiltered chunks can render straight
     // from the point cloud's arrays rather than copies of them
     const layerOrigin: [number, number, number] = [
@@ -690,10 +696,11 @@ export class PointCloudManager {
       const chunkStart = chunk * CHUNK_SIZE;
       const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, visibleCount);
       const chunkSize = chunkEnd - chunkStart;
-      chunkSizes.push(chunkSize);
 
-      // Unchanged since its layer was created: keep the layer, so deck.gl doesn't upload it again
-      if (filteredIndices == null && chunkEnd <= changedFrom && pc.chunkSizes[chunk] === chunkSize) {
+      // Unchanged since its layer was created, and that layer ends where this chunk does: keep
+      // the layer, so deck.gl doesn't upload it again
+      const layerEnd = Math.min(chunkStart + CHUNK_SIZE, pc.layerPointCount);
+      if (filteredIndices == null && chunkEnd <= changedFrom && layerEnd === chunkEnd) {
         continue;
       }
 
@@ -810,8 +817,8 @@ export class PointCloudManager {
       this._deckOverlay.addLayer(`pointcloud-${id}-chunk${chunk}`, layer);
     }
 
-    this._removeChunkLayers(id, numChunks, pc.chunkSizes.length);
-    this._pointClouds.set(id, { ...pc, chunkSizes });
+    this._removeChunkLayers(id, numChunks, chunkCount(pc.layerPointCount));
+    this._pointClouds.set(id, { ...pc, layerPointCount: visibleCount });
   }
 
   /**
