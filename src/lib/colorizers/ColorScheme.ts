@@ -15,9 +15,10 @@ const ATTRIBUTE_OPTION_PREFIX = 'attr:';
 /**
  * How far, as a fraction of their range, gradient color bounds may move before points that
  * already have colors are recolored. Bounds from a growing point cloud shift a little with
- * every update, and recoloring every point for that is what makes updates slow.
+ * every update, partly from sampling noise in percentile bounds, and recoloring every point
+ * for that is what makes updates slow.
  */
-const BOUNDS_REUSE_TOLERANCE = 0.01;
+const BOUNDS_REUSE_TOLERANCE = 0.05;
 
 /**
  * ASPRS LAS classification standard colors
