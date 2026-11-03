@@ -269,7 +269,7 @@ export class CrossSectionTool {
       stroked: true,
       filled: true,
       // Disable depth testing so this layer renders on top of points and terrain
-      parameters: interleaved ? {
+      parameters: this._interleaved ? {
         depthCompare: 'always',
         depthWriteEnabled: false,
       } : {

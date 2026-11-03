@@ -6,6 +6,7 @@ import type { PointCloudData } from '../loaders/types';
 import type { ColormapName, ColorRangeConfig, ColorScheme, PointCloudBounds } from '../core/types';
 import type { PickedPointInfo, PointCloudLayerOptions } from './types';
 import { ColorSchemeProcessor, getSchemeFilterValues } from '../colorizers/ColorScheme';
+import { resizedArray } from '../loaders/pointBuffers';
 
 // Web Mercator ground resolution at zoom 0 (meters/pixel at the equator) for a 512px tile.
 const WEB_MERCATOR_METERS_PER_PIXEL_AT_ZOOM_0 = 78271.51696402048;
@@ -31,16 +32,16 @@ function pointSizeMeters(
 const CHUNK_SIZE = 1000000;
 
 /**
- * `colors` when it holds at least `length` bytes, otherwise a larger array with its first `keep`
- * bytes. Grows by half again, so the colors of a streamed cloud aren't reallocated every update.
+ * `colors` when it holds `length` to twice `length` bytes, otherwise a resized array with its
+ * first `keep` bytes. Grows by half again, so the colors of a streamed cloud aren't reallocated
+ * every update, and shrinks to `length` once oversized, so they follow a shrunk positions buffer.
  */
 function colorsWithCapacity(colors: Uint8Array, length: number, keep: number): Uint8Array {
-  if (colors.length >= length) {
+  if (colors.length >= length && colors.length <= length * 2) {
     return colors;
   }
-  const grown = new Uint8Array(Math.max(length, Math.floor(colors.length * 1.5)));
-  grown.set(colors.subarray(0, keep));
-  return grown;
+  const size = colors.length < length ? Math.max(length, Math.floor(colors.length * 1.5)) : length;
+  return resizedArray(colors, size, keep);
 }
 
 /**
@@ -197,7 +198,7 @@ export class PointCloudManager {
       // Points before `changedFrom` are as they were last update, so they keep their colors
       // and, where a whole chunk of them is unchanged, their layer
       const changedFrom = Math.min(data.changedFrom ?? 0, existing.data.pointCount);
-      // Colors match the capacity of the positions buffer, so they only grow when it does
+      // Colors follow the capacity of the positions buffer, so they only resize when it does
       const capacity = Math.max(data.pointCount, data.positions.buffer.byteLength / 12);
       const result = this._colorProcessor.getColorsWithBounds(data, this._options.colorScheme, {
         usePercentile: this._options.usePercentile,
