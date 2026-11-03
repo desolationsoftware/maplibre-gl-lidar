@@ -654,8 +654,8 @@ export class PointCloudManager {
    *
    * @param id - Point cloud id
    * @param changedFrom - First point whose data or color changed since the layers were last
-   *   created, or Infinity if none did. Chunks of points before it reuse their layer data,
-   *   unless a filter is active.
+   *   created, or Infinity if none did. Chunks of points before it reuse their layer data.
+   *   A filter change must pass 0, since earlier points may then filter differently.
    */
   private _createLayer(id: string, changedFrom: number = 0): void {
     const pc = this._pointClouds.get(id);
@@ -726,10 +726,11 @@ export class PointCloudManager {
         filteredIndices != null ? filteredIndices[chunkStart + chunkIndex] : chunkStart + chunkIndex;
 
       // Unchanged since its layer was created, and that layer ends where this chunk does: reuse
-      // its data, so deck.gl doesn't upload it again
+      // its data, so deck.gl doesn't upload it again. Under an unchanged filter, points before
+      // `changedFrom` filter as they did, so filtered chunks of them hold the same points.
       const previous = pc.chunkData[chunk];
       let layerData: ChunkLayerData;
-      if (filteredIndices == null && chunkEnd <= changedFrom && previous?.length === chunkSize) {
+      if (toSourceIndex(chunkSize - 1) < changedFrom && previous?.length === chunkSize) {
         layerData = previous;
       } else if (filteredIndices == null) {
         layerData = createChunkLayerData(
