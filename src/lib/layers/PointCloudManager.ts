@@ -197,6 +197,8 @@ export class PointCloudManager {
       // Points before `changedFrom` are as they were last update, so they keep their colors
       // and, where a whole chunk of them is unchanged, their layer
       const changedFrom = Math.min(data.changedFrom ?? 0, existing.data.pointCount);
+      // Colors match the capacity of the positions buffer, so they only grow when it does
+      const capacity = Math.max(data.pointCount, data.positions.buffer.byteLength / 12);
       const result = this._colorProcessor.getColorsWithBounds(data, this._options.colorScheme, {
         usePercentile: this._options.usePercentile,
         colormap: this._options.colormap,
@@ -204,7 +206,7 @@ export class PointCloudManager {
         hiddenClassifications: this._options.hiddenClassifications,
         classificationStyles: this._options.classificationStyles,
       }, {
-        colors: colorsWithCapacity(existing.colors, data.pointCount * 4, changedFrom * 4),
+        colors: colorsWithCapacity(existing.colors, capacity * 4, changedFrom * 4),
         start: changedFrom,
         bounds: existing.colorBounds,
       });
@@ -227,8 +229,9 @@ export class PointCloudManager {
       });
 
       // Recolored points need their layers rebuilt too, and every layer does once the
-      // loader reallocates its buffers, so none keeps rendering from the old ones
-      const sameBuffers = data.positions.buffer === existing.data.positions?.buffer;
+      // loader or the colors reallocate their buffers, so none keeps the old ones alive
+      const sameBuffers = data.positions.buffer === existing.data.positions?.buffer &&
+        result.colors.buffer === existing.colors.buffer;
       this._createLayer(id, sameBuffers ? result.start : 0);
     } else {
       // New point cloud - use existing addPointCloud

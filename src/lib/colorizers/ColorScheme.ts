@@ -288,9 +288,9 @@ export class ColorSchemeProcessor {
     styles?: ClassificationStyles
   ): ColorResult {
     if (!data.hasClassification || !data.classifications) {
-      // Fall back to elevation if no classification data
-      const result = this._colorByElevation(data, from, 'viridis', undefined, true);
-      return { colors: result.colors, start: result.start };
+      // Fall back to elevation if no classification data, keeping its bounds so later
+      // updates can reuse its colors
+      return this._colorByElevation(data, from, 'viridis', undefined, true);
     }
 
     const { colors } = from;
@@ -315,9 +315,9 @@ export class ColorSchemeProcessor {
    */
   private _colorByRGB(data: PointCloudData, from: ColorReuse): ColorResult {
     if (!data.hasRGB || !data.colors) {
-      // Fall back to elevation if no RGB data
-      const result = this._colorByElevation(data, from, 'viridis', undefined, true);
-      return { colors: result.colors, start: result.start };
+      // Fall back to elevation if no RGB data, keeping its bounds so later updates can
+      // reuse its colors
+      return this._colorByElevation(data, from, 'viridis', undefined, true);
     }
 
     // data.colors is stored as RGBA (4 bytes per point)
