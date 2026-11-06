@@ -85,6 +85,8 @@ interface ManagedPointCloud {
   opacityOverride: number | null;
   /** Data of the deck.gl chunk layers currently created for this point cloud */
   chunkData: ChunkLayerData[];
+  /** Part of the chunk layer ids, changed whenever the point buffers are reallocated */
+  layerGeneration?: number;
   /** Full range of the gradient-colored values, if the current scheme yielded one */
   dataBounds?: { min: number; max: number };
 }
@@ -188,6 +190,7 @@ export class PointCloudManager {
           visible: existing.visible,
           opacityOverride: existing.opacityOverride,
           chunkData: existing.chunkData,
+          layerGeneration: existing.layerGeneration,
         });
         this._createLayer(id);
       }
@@ -226,6 +229,7 @@ export class PointCloudManager {
         visible: existing.visible,
         opacityOverride: existing.opacityOverride,
         chunkData: existing.chunkData,
+        layerGeneration: existing.layerGeneration,
         dataBounds: result.dataBounds,
       });
 
@@ -659,8 +663,16 @@ export class PointCloudManager {
    *   A filter change must pass 0, since earlier points may then filter differently.
    */
   private _createLayer(id: string, changedFrom: number = 0): void {
-    const pc = this._pointClouds.get(id);
+    let pc = this._pointClouds.get(id);
     if (!pc) return;
+
+    // Every chunk gets new data, so the layers move to new ids: deck.gl keeps the first layer
+    // created under an id, and its data, alive for as long as the id is in use
+    if (changedFrom === 0 && pc.chunkData.length > 0) {
+      this._removeChunkLayers(id, 0, pc.chunkData.length);
+      pc = { ...pc, chunkData: [], layerGeneration: (pc.layerGeneration ?? 0) + 1 };
+      this._pointClouds.set(id, pc);
+    }
 
     const { data, colors, coordinateOrigin, visible, opacityOverride } = pc;
     const elevationRange = this._options.elevationRange;
@@ -816,8 +828,9 @@ export class PointCloudManager {
       const elevationKey = elevationRange ? `${elevationRange[0]}-${elevationRange[1]}` : 'none';
       const filterKey = filterRange ? `${filterRange[0]}-${filterRange[1]}` : 'none';
 
+      const layerId = this._layerId(id, chunk);
       const layer = new PointCloudLayer({
-        id: `pointcloud-${id}-chunk${chunk}`,
+        id: layerId,
         coordinateSystem: COORDINATE_SYSTEM.LNGLAT_OFFSETS,
         coordinateOrigin: layerOrigin,
         data: layerData,
@@ -836,7 +849,7 @@ export class PointCloudManager {
         },
       });
 
-      this._deckOverlay.addLayer(`pointcloud-${id}-chunk${chunk}`, layer);
+      this._deckOverlay.addLayer(layerId, layer);
     }
 
     this._removeChunkLayers(id, numChunks, pc.chunkData.length);
@@ -848,8 +861,16 @@ export class PointCloudManager {
    */
   private _removeChunkLayers(id: string, from: number, to: number): void {
     for (let chunk = from; chunk < to; chunk++) {
-      this._deckOverlay.removeLayer(`pointcloud-${id}-chunk${chunk}`);
+      this._deckOverlay.removeLayer(this._layerId(id, chunk));
     }
+  }
+
+  /**
+   * Gets the deck.gl layer id of a point cloud's chunk.
+   */
+  private _layerId(id: string, chunk: number): string {
+    const generation = this._pointClouds.get(id)?.layerGeneration ?? 0;
+    return generation === 0 ? `pointcloud-${id}-chunk${chunk}` : `pointcloud-${id}-g${generation}-chunk${chunk}`;
   }
 
   /**
