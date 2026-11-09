@@ -619,45 +619,53 @@ export class PointCloudManager {
     }
 
     // Build filtered indices list. Schemes without a continuous domain have
-    // no filter values, so the range filter passes every point.
+    // no filter values, so the range filter passes every point. When no
+    // filter is active the list is left null rather than built as the
+    // identity, since layers are rebuilt often and filtering is the rare case.
     const filterValues = filterRange ? getSchemeFilterValues(data, this._options.colorScheme) : undefined;
-    const filteredIndices: number[] = [];
+    const rangeFilterActive = filterRange !== null && filterValues !== undefined;
+    let filteredIndices: number[] | null = null;
 
-    for (let i = 0; i < data.pointCount; i++) {
-      const elevation = data.positions[i * 3 + 2];
-      if (elevationRange !== null &&
-          (elevation < elevationRange[0] || elevation > elevationRange[1])) {
-        continue;
+    if (elevationRange !== null || rangeFilterActive) {
+      filteredIndices = [];
+      for (let i = 0; i < data.pointCount; i++) {
+        const elevation = data.positions[i * 3 + 2];
+        if (elevationRange !== null &&
+            (elevation < elevationRange[0] || elevation > elevationRange[1])) {
+          continue;
+        }
+        if (rangeFilterActive &&
+            (filterValues[i] < filterRange[0] || filterValues[i] > filterRange[1])) {
+          continue;
+        }
+        filteredIndices.push(i);
       }
-      if (filterRange !== null && filterValues &&
-          (filterValues[i] < filterRange[0] || filterValues[i] > filterRange[1])) {
-        continue;
-      }
-      filteredIndices.push(i);
     }
+    const visibleCount = filteredIndices?.length ?? data.pointCount;
 
     // If no points pass the filter, don't create any layers
-    if (filteredIndices.length === 0) {
+    if (visibleCount === 0) {
       this._pointClouds.set(id, { ...pc, chunkCount: 0 });
       return;
     }
 
     // Chunk size - 1 million points per layer to stay within WebGL limits
     const CHUNK_SIZE = 1000000;
-    const numChunks = Math.ceil(filteredIndices.length / CHUNK_SIZE);
+    const numChunks = Math.ceil(visibleCount / CHUNK_SIZE);
 
     for (let chunk = 0; chunk < numChunks; chunk++) {
       const chunkStart = chunk * CHUNK_SIZE;
-      const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, filteredIndices.length);
+      const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, visibleCount);
       const chunkSize = chunkEnd - chunkStart;
 
       const chunkPositions = new Float32Array(chunkSize * 3);
       const chunkColors = new Uint8Array(chunkSize * 4);
-      const originalIndices: number[] = [];
+      // Maps an index within this chunk back to the point's index in data.
+      const toSourceIndex = (chunkIndex: number): number =>
+        filteredIndices != null ? filteredIndices[chunkStart + chunkIndex] : chunkStart + chunkIndex;
 
       for (let i = 0; i < chunkSize; i++) {
-        const srcIdx = filteredIndices[chunkStart + i];
-        originalIndices.push(srcIdx);
+        const srcIdx = toSourceIndex(i);
 
         chunkPositions[i * 3] = data.positions[srcIdx * 3];
         chunkPositions[i * 3 + 1] = data.positions[srcIdx * 3 + 1];
@@ -672,8 +680,8 @@ export class PointCloudManager {
 
       // Describes the picked point of this chunk, or null for a miss.
       const pickedPoint = (info: PickingInfo): PickedPointInfo | null => {
-        if (info.index >= 0 && info.picked && info.index < originalIndices.length) {
-          const originalIndex = originalIndices[info.index];
+        if (info.index >= 0 && info.picked && info.index < chunkSize) {
+          const originalIndex = toSourceIndex(info.index);
           const pointInfo: PickedPointInfo = {
             pointCloudId: id,
             index: originalIndex,
