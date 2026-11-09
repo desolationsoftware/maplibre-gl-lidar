@@ -1,4 +1,4 @@
-import { load } from '@loaders.gl/core';
+import { parse } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import proj4 from 'proj4';
 import type { NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
@@ -163,6 +163,11 @@ function getVerticalUnitConversionFactor(wkt: string): number {
 }
 
 /**
+ * How long loaded nodes accumulate before the layer is rebuilt.
+ */
+const LAYER_UPDATE_BATCH_MS = 100;
+
+/**
  * Default options for streaming loader
  */
 const DEFAULT_OPTIONS: Required<StreamingLoaderOptions> = {
@@ -210,7 +215,21 @@ export class EptStreamingLoader {
 
   // Loading state
   private _loadingQueue: EptCachedNode[] = [];
+  /** Nodes between the start of their fetch and the end of their decode. */
   private _activeRequests: number = 0;
+  /**
+   * Nodes whose data is still downloading.
+   * This is what `maxConcurrentRequests` caps
+   */
+  private _activeFetches: number = 0;
+  /**
+   * Points of the nodes still downloading. They count against the point budget, but their
+   * buffer space is only reserved once their bytes arrive, so a download that fails or is
+   * aborted never leaves a hole beneath nodes that reserved after it.
+   */
+  private _fetchingPoints: number = 0;
+  /** In-flight node downloads, so ones the viewport has left can be abandoned. */
+  private _nodeFetchControllers: Map<EptCachedNode, AbortController> = new Map();
   private _paused = false;
   private _hasReservationGaps = false;
   private _totalLoadedPoints: number = 0;
@@ -918,12 +937,12 @@ export class EptStreamingLoader {
     if (this._paused) return;
     while (
       this._loadingQueue.length > 0 &&
-      this._activeRequests < this._options.maxConcurrentRequests &&
-      this._totalLoadedPoints < this._options.pointBudget
+      this._activeFetches < this._options.maxConcurrentRequests &&
+      this._totalLoadedPoints + this._fetchingPoints < this._options.pointBudget
     ) {
       const node = this._loadingQueue.shift()!;
 
-      if (this._totalLoadedPoints + node.pointCount > this._options.pointBudget) {
+      if (this._totalLoadedPoints + this._fetchingPoints + node.pointCount > this._options.pointBudget) {
         this._emit('budgetreached', this._getProgressEvent());
         break;
       }
@@ -953,22 +972,35 @@ export class EptStreamingLoader {
 
     node.state = 'loading';
     this._activeRequests++;
-
-    // Reserve buffer space before async operations
-    const startIndex = this._totalLoadedPoints;
-    node.bufferStartIndex = startIndex;
-    const reservedPoints = node.pointCount;
-    this._totalLoadedPoints += reservedPoints;
+    this._activeFetches++;
+    this._fetchingPoints += node.pointCount;
+    let fetchSlotHeld = true;
+    let reservedPoints = 0;
+    const fetchController = new AbortController();
+    this._nodeFetchControllers.set(node, fetchController);
 
     try {
-      const dataUrl = this._getDataUrl(node.key);
+      const buffer = await this._fetchNodeData(this._getDataUrl(node.key), fetchController.signal);
+
+      // The download is done, so start the next one before spending main-thread time
+      // decoding this one. `_activeRequests` stays held until the decode has written its
+      // points, which is what keeps eviction and reset away from the buffers meanwhile.
+      this._releaseFetchSlot(node);
+      fetchSlotHeld = false;
+
+      const startIndex = this._totalLoadedPoints;
+      node.bufferStartIndex = startIndex;
+      reservedPoints = node.pointCount;
+      this._totalLoadedPoints += reservedPoints;
+
+      this.loadQueuedNodes();
 
       if (this._metadata?.dataType === 'laszip') {
-        // Use @loaders.gl/las to load and decompress LAZ files
-        await this._loadLazNode(dataUrl, node, startIndex);
+        // Use @loaders.gl/las to decompress LAZ files
+        await this._decodeLazNode(buffer, node, startIndex);
       } else {
-        // Binary format - load and parse directly
-        await this._loadBinaryNode(dataUrl, node, startIndex);
+        // Binary format - parse directly
+        this._decodeBinaryNode(buffer, node, startIndex);
       }
 
       node.state = 'loaded';
@@ -987,12 +1019,20 @@ export class EptStreamingLoader {
       // it: otherwise a later node could be handed an overlapping range. A gap
       // left behind is reclaimed once no request is in flight
       // (_reclaimFailedReservations).
-      if (node.bufferStartIndex !== undefined && node.bufferStartIndex + reservedPoints === this._totalLoadedPoints) {
-        this._totalLoadedPoints -= reservedPoints;
-      } else {
-        this._hasReservationGaps = true;
+      if (node.bufferStartIndex !== undefined) {
+        if (node.bufferStartIndex + reservedPoints === this._totalLoadedPoints) {
+          this._totalLoadedPoints -= reservedPoints;
+        } else {
+          this._hasReservationGaps = true;
+        }
       }
       node.bufferStartIndex = undefined;
+
+      if (fetchController.signal.aborted) {
+        // Abandoned rather than failed: it can load again, without penalty, once reselected.
+        node.state = 'pending';
+        return;
+      }
 
       // Track retry count and set cooldown timestamp
       node.retryCount = (node.retryCount || 0) + 1;
@@ -1015,6 +1055,9 @@ export class EptStreamingLoader {
         console.warn(`Failed to load EPT node ${node.key} after ${maxRetries} attempts: ${node.error}`);
       }
     } finally {
+      if (fetchSlotHeld) {
+        this._releaseFetchSlot(node);
+      }
       this._activeRequests--;
       if (!this._abort.signal.aborted) {
         this._reclaimFailedReservations();
@@ -1058,25 +1101,49 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Loads a LAZ node using @loaders.gl/las.
+   * Stops counting a node as downloading, once its bytes have arrived or its fetch has failed.
    *
-   * @param url - URL to the LAZ file
+   * @param node - Node whose download has finished
+   */
+  private _releaseFetchSlot(node: EptCachedNode): void {
+    this._activeFetches--;
+    this._fetchingPoints -= node.pointCount;
+    this._nodeFetchControllers.delete(node);
+  }
+
+  /**
+   * Downloads a node's data file.
+   *
+   * @param url - URL to the data file
+   * @param signal - Aborts the download
+   * @returns The file's bytes
+   */
+  private async _fetchNodeData(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
+    const response = await fetch(url, { signal });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch node data: ${response.status}`);
+    }
+    return response.arrayBuffer();
+  }
+
+  /**
+   * Decodes a LAZ node using @loaders.gl/las.
+   *
+   * @param buffer - The LAZ file's bytes
    * @param _node - Node being loaded (unused, point count from file)
    * @param startIndex - Starting index in buffers
    */
-  private async _loadLazNode(
-    url: string,
+  private async _decodeLazNode(
+    buffer: ArrayBuffer,
     _node: EptCachedNode,
     startIndex: number
   ): Promise<void> {
-    // Load LAZ file using loaders.gl
-    const data = await load(url, LASLoader, {
+    const data = await parse(buffer, LASLoader, {
       las: {
         shape: 'mesh',
         fp64: false,
       },
       worker: false,
-      core: { fetch: { signal: this._abort.signal } },
     }) as any;
 
     // Get point data from the loaded result (loaders.gl mesh format)
@@ -1163,23 +1230,13 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Loads a binary node.
+   * Decodes a binary node.
    *
-   * @param url - URL to the binary file
+   * @param buffer - The binary file's bytes
    * @param node - Node being loaded
    * @param startIndex - Starting index in buffers
    */
-  private async _loadBinaryNode(
-    url: string,
-    node: EptCachedNode,
-    startIndex: number
-  ): Promise<void> {
-    const response = await fetch(url, { signal: this._abort.signal });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch binary data: ${response.status}`);
-    }
-
-    const buffer = await response.arrayBuffer();
+  private _decodeBinaryNode(buffer: ArrayBuffer, node: EptCachedNode, startIndex: number): void {
     const dataView = new DataView(buffer);
 
     // Find dimension getters
@@ -1191,6 +1248,8 @@ export class EptStreamingLoader {
     const redGetter = this._hasColor ? this._parsedSchema.find(p => p.dimension.name === 'Red')?.getter : null;
     const greenGetter = this._hasColor ? this._parsedSchema.find(p => p.dimension.name === 'Green')?.getter : null;
     const blueGetter = this._hasColor ? this._parsedSchema.find(p => p.dimension.name === 'Blue')?.getter : null;
+    // EPT colors can be 8-bit or 16-bit depending on schema
+    const is16BitColor = this._parsedSchema.find(p => p.dimension.name === 'Red')?.dimension.size === 2;
 
     if (!xGetter || !yGetter || !zGetter) {
       throw new Error('Missing required X, Y, Z dimensions in EPT schema');
@@ -1257,11 +1316,7 @@ export class EptStreamingLoader {
 
       // Color (if available)
       if (this._colors && redGetter && greenGetter && blueGetter) {
-        // EPT colors can be 8-bit or 16-bit depending on schema
-        const redDim = this._parsedSchema.find(p => p.dimension.name === 'Red')?.dimension;
-        const is16Bit = redDim?.size === 2;
-
-        if (is16Bit) {
+        if (is16BitColor) {
           this._colors[pointIndex * 4] = redGetter(dataView, byteOffset) >> 8;
           this._colors[pointIndex * 4 + 1] = greenGetter(dataView, byteOffset) >> 8;
           this._colors[pointIndex * 4 + 2] = blueGetter(dataView, byteOffset) >> 8;
@@ -1294,7 +1349,7 @@ export class EptStreamingLoader {
       this._performLayerUpdate();
       this._pendingLayerUpdate = false;
       this._updateBatchTimeout = null;
-    }, 100);
+    }, LAYER_UPDATE_BATCH_MS);
   }
 
   /**
@@ -1553,11 +1608,19 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Removes queued nodes that are outside the current viewport and re-sorts priorities.
+   * Removes queued nodes that are outside the current viewport, aborts downloads of any
+   * in-flight ones, and re-sorts priorities.
    *
    * @param viewport - Current viewport information
    */
   pruneQueueForViewport(viewport: ViewportInfo): void {
+    // Downloads the viewport has left would otherwise hold connections the nodes now in view need.
+    for (const [ node, controller ] of this._nodeFetchControllers) {
+      if (!this._boundsIntersectsViewport(node.boundsWgs84, viewport)) {
+        controller.abort();
+      }
+    }
+
     if (this._loadingQueue.length === 0) return;
 
     this._loadingQueue = this._loadingQueue.filter((node) =>
@@ -1669,6 +1732,9 @@ export class EptStreamingLoader {
    */
   destroy(): void {
     this._abort.abort();
+    for (const controller of this._nodeFetchControllers.values()) {
+      controller.abort();
+    }
     if (this._updateBatchTimeout) {
       clearTimeout(this._updateBatchTimeout);
     }
