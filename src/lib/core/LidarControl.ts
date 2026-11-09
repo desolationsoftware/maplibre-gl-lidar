@@ -307,8 +307,7 @@ export class LidarControl implements IControl {
    * Implements the IControl interface.
    */
   onRemove(): void {
-    // Stop tile following first, so each tile unloads through the normal dataset path. The
-    // option is left alone so re-adding the control resumes it.
+    // Stop tile following if active
     this._stopTileMode();
 
     // Stop streaming if active
@@ -840,7 +839,7 @@ export class LidarControl implements IControl {
         zOffset = -zOffsetBase;
         zOffsetEnabled = true;
         this._pointCloudManager?.setZOffset(zOffset);
-        this._recordAutoZOffset(options?.internal);
+        this._setTileZOffsetApplied(options?.internal);
         console.log(`Auto Z offset applied: zOffsetBase=${zOffsetBase.toFixed(1)}, zOffset=${zOffset.toFixed(1)}, enabled=${zOffsetEnabled}`);
       } else if (this._manualZOffset) {
         // User explicitly set zOffset — apply it now that the point cloud is loaded
@@ -1056,7 +1055,7 @@ export class LidarControl implements IControl {
           // Apply negative offset to convert absolute elevation to relative height above ground
           const zOffset = -zOffsetBase;
           this._pointCloudManager?.setZOffset(zOffset);
-          this._recordAutoZOffset(options?.internal);
+          this._setTileZOffsetApplied(options?.internal);
           console.log(`Auto Z offset applied (streaming): ${zOffset.toFixed(1)}m (ground level from bounds: ${zOffsetBase.toFixed(1)}m)`);
           // Update state to trigger panel slider update
           this.setState({
@@ -1306,7 +1305,7 @@ export class LidarControl implements IControl {
           const zOffsetBase = data.bounds.minZ;
           const zOffset = -zOffsetBase;
           this._pointCloudManager?.setZOffset(zOffset);
-          this._recordAutoZOffset(options?.internal);
+          this._setTileZOffsetApplied(options?.internal);
           console.log(`Auto Z offset applied (EPT streaming): ${zOffset.toFixed(1)}m`);
           this.setState({
             zOffsetBase,
@@ -1778,10 +1777,9 @@ export class LidarControl implements IControl {
   }
 
   /**
-   * Adapts this control to the interface the tile source drives. Each tile is an ordinary
-   * dataset, loaded the same way as a single URL, but one that never falls back to a
-   * whole-file download, never moves the map, and is marked internal so the panel does
-   * not list every tile.
+   * Creates an interface for the TilePointCloudSource to load and unload tiles.
+   * Each tile is an ordinary dataset, loaded the same way as a single URL,
+   * but one that is marked as internal.
    */
   private _createTileHost(): TilePointCloudHost {
     return {
@@ -1819,10 +1817,8 @@ export class LidarControl implements IControl {
   }
 
   /** Notes that a load set the auto Z offset. */
-  private _recordAutoZOffset(internal: boolean | undefined): void {
-    if (internal) {
-      this._tileZOffsetApplied = true;
-    }
+  private _setTileZOffsetApplied(tileZOffsetApplied: boolean | undefined): void {
+    this._tileZOffsetApplied = tileZOffsetApplied ?? false;
   }
 
   /**

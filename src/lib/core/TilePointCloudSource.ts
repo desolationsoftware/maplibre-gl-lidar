@@ -2,12 +2,9 @@ import type { ViewportInfo } from '../loaders/streaming-types';
 import { enumerateTileRange, extendBoundsOutwardByFactor, getTileRangeForBounds, rangeContainsTileInclusive, type TileId } from '../utils/tileMath';
 import { isEptUrl, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
 
-/**
- * The slice of `LidarControl` the tile source needs.
- */
 export interface TilePointCloudHost {
   /**
-   * Loads one tile and resolves to its dataset id. Once `signal` aborts, the load should
+   * Loads one tile and resolves to its dataset id. If `signal` aborts, the load should
    * stop and reject without adding the tile to the map.
    */
   loadTile(url: string, label: string, signal: AbortSignal, pointBudget: number): Promise<string>;
@@ -21,7 +18,7 @@ export interface TilePointCloudHost {
 
 export interface TilePointCloudSourceOptions {
   /**
-   * URL template for a tile, with `{z}`, `{x}` and `{y}` placeholders (XYZ scheme).
+   * URL template for a tile, with `{z}`, `{x}` and `{y}` placeholders.
    * Relative URLs resolve against the page URL.
    *
    * The format is inferred from the URL the same way as for a single load: a URL ending
@@ -40,7 +37,7 @@ export interface TilePointCloudSourceOptions {
    */
   tileZoom?: number;
   /**
-   * Display zoom below which all tiles unload. Also what bounds how many tiles load at once.
+   * Display zoom below which all tiles unload.
    *
    * @default 15
    */
@@ -52,7 +49,7 @@ export interface TilePointCloudSourceOptions {
    * @default 80000000
    */
   pointBudget?: number;
-  /** Upper bound on remembered absent and present tiles, so a long session cannot grow unboundedly. */
+  /** Upper bound on remembered absent and present tiles, so a long session cannot grow without bound. */
   maxNegativeCacheEntries?: number;
   /** Base delay before retrying a tile that failed for a reason other than "absent". */
   retryBackoffMs?: number;
