@@ -25,11 +25,12 @@ export default defineConfig({
     }),
   ],
   resolve: {
-    alias: {
-      '@': resolve(__dirname, 'src'),
-      // Force laz-perf to use browser version (no fs/path requires)
-      'laz-perf': resolve(__dirname, 'node_modules/laz-perf/lib/web/index.js'),
-    },
+    alias: [
+      { find: '@', replacement: resolve(__dirname, 'src') },
+      // Force laz-perf to use browser version (no fs/path requires). Exact match, so the decode
+      // worker's import of laz-perf's worker build is left alone.
+      { find: /^laz-perf$/, replacement: resolve(__dirname, 'node_modules/laz-perf/lib/web/index.js') },
+    ],
   },
   assetsInclude: ['**/*.wasm'],
   build: {
