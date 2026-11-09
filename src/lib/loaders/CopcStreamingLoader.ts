@@ -5,8 +5,9 @@ import proj4 from 'proj4';
 import type { CachedNode, NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
-import { clampLatLng, compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
+import { clampLatLng, compareNodePriority, loadedKeysWithinBudget, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR, type BudgetCandidate } from '../utils/helpers';
 import { copyViewPoints, type PointTarget } from './viewPoints';
+import { fittedCapacity, grownCapacity, initialCapacity, resizedArray } from './pointBuffers';
 
 // Register common projected coordinate systems that might not have WKT in files
 // EPSG:2180 - ETRS89 / Poland CS92 (commonly used in Poland)
@@ -193,7 +194,9 @@ export class CopcStreamingLoader {
   // Node cache - tracks all known nodes and their state
   private _nodeCache: Map<string, CachedNode> = new Map();
 
-  // Point data buffers - pre-allocated for point budget
+  // Point data buffers
+  /** Points the buffers have room for. Grows as points load and shrinks on eviction. */
+  private _capacity: number = 0;
   private _positions: Float32Array | null = null;
   private _colors: Uint8Array | null = null;
   private _intensities: Float32Array | null = null;
@@ -400,7 +403,6 @@ export class CopcStreamingLoader {
       this._spacingInMeters = this._spacing;
     }
 
-    // Pre-allocate buffers for point budget
     this._allocateBuffers();
 
     this._isInitialized = true;
@@ -414,15 +416,52 @@ export class CopcStreamingLoader {
   }
 
   /**
-   * Pre-allocates buffers for the point budget.
+   * Allocates the buffers at their starting capacity; they grow as points load.
    */
   private _allocateBuffers(): void {
-    const budget = this._options.pointBudget;
-    this._positions = new Float32Array(budget * 3);
-    this._intensities = new Float32Array(budget);
-    this._classifications = new Uint8Array(budget);
+    const capacity = initialCapacity(this._options.pointBudget);
+    this._positions = new Float32Array(capacity * 3);
+    this._intensities = new Float32Array(capacity);
+    this._classifications = new Uint8Array(capacity);
     if (this._hasColor) {
-      this._colors = new Uint8Array(budget * 4);
+      this._colors = new Uint8Array(capacity * 4);
+    }
+    this._capacity = capacity;
+  }
+
+  /**
+   * Reallocates the buffers to hold `capacity` points, keeping every reserved point. Only
+   * safe between writes: loads look the buffers up when they copy points in.
+   */
+  private _resizeBuffers(capacity: number): void {
+    const keep = this._totalLoadedPoints;
+    this._positions = resizedArray(this._positions!, capacity * 3, keep * 3);
+    this._intensities = resizedArray(this._intensities!, capacity, keep);
+    this._classifications = resizedArray(this._classifications!, capacity, keep);
+    if (this._colors) {
+      this._colors = resizedArray(this._colors, capacity * 4, keep * 4);
+    }
+    for (const [name, arr] of Object.entries(this._extraAttributes)) {
+      this._extraAttributes[name] = resizedArray(arr, capacity, keep);
+    }
+    this._capacity = capacity;
+  }
+
+  /** Grows the buffers, if needed, to hold `needed` points. */
+  private _ensureCapacity(needed: number): void {
+    const capacity = grownCapacity(this._capacity, needed, this._options.pointBudget);
+    if (capacity !== this._capacity) {
+      this._resizeBuffers(capacity);
+    }
+  }
+
+  /** Shrinks the buffers once they are oversized for the loaded points or the budget. */
+  private _fitCapacity(): void {
+    const capacity = fittedCapacity(this._capacity, this._totalLoadedPoints, this._options.pointBudget);
+    if (capacity !== this._capacity) {
+      this._resizeBuffers(capacity);
+      // The layer holds views of the old buffers until it's updated.
+      this._scheduleLayerUpdate();
     }
   }
 
@@ -635,26 +674,16 @@ export class CopcStreamingLoader {
     await this._ensureHierarchyLoaded('0-0-0-0');
 
     const nodesToLoad: CachedNode[] = [];
-    const targetDepth = viewport.targetDepth;
 
     // Load ALL nodes that intersect viewport, from depth 0 up to targetDepth + 1
     // This ensures parent nodes provide coverage where child nodes don't exist
     for (const [, node] of this._nodeCache) {
-      const depth = node.keyArray[0];
-
-      // Skip nodes deeper than we need
-      if (depth > targetDepth + 1) continue;
-
-      // Check viewport intersection
-      if (!this._boundsIntersectsViewport(node.boundsWgs84, viewport)) {
-        continue;
-      }
+      if (!this._viewportWantsNode(node, viewport)) continue;
 
       // Add to load list if not already loaded/loading
       if (node.state !== 'loaded' && node.state !== 'loading') {
         // Coarse-to-fine, then nearest-first within a depth
-        const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-        node.priority = nodeLoadPriority(depth, distPriority);
+        node.priority = this._nodeLoadPriority(node, viewport);
         nodesToLoad.push(node);
       }
     }
@@ -663,6 +692,60 @@ export class CopcStreamingLoader {
     nodesToLoad.sort(compareNodePriority);
 
     return nodesToLoad;
+  }
+
+  /** Whether a node intersects the viewport and is no deeper than the viewport needs. */
+  private _viewportWantsNode(node: CachedNode, viewport: ViewportInfo): boolean {
+    return node.keyArray[0] <= viewport.targetDepth + 1 &&
+      this._boundsIntersectsViewport(node.boundsWgs84, viewport);
+  }
+
+  /** Coarse-to-fine, then nearest the viewport center first within a depth. */
+  private _nodeLoadPriority(node: CachedNode, viewport: ViewportInfo): number {
+    return nodeLoadPriority(node.keyArray[0], this._calculateNodePriority(node.boundsWgs84, viewport));
+  }
+
+  /**
+   * Loaded nodes worth keeping: pinned ones, then those in view that still fit the rest of
+   * the point budget when every node the viewport wants is taken in load order. Deeper
+   * nodes give way to coarser ones.
+   */
+  private _loadedKeysToKeep(viewport: ViewportInfo): Set<string> {
+    const candidates: BudgetCandidate[] = [];
+    for (const node of this._nodeCache.values()) {
+      const loaded = node.state === 'loaded' && node.bufferStartIndex !== undefined;
+      if (this._pinnedKeys.has(node.key)) {
+        continue;
+      }
+      const wanted = loaded
+        ? this._boundsIntersectsViewport(node.boundsWgs84, viewport)
+        : node.state === 'pending' && this._viewportWantsNode(node, viewport);
+      if (wanted) {
+        candidates.push({
+          key: node.key,
+          pointCount: node.pointCount,
+          priority: this._nodeLoadPriority(node, viewport),
+          loaded,
+        });
+      }
+    }
+    const keep = loadedKeysWithinBudget(candidates, this._options.pointBudget - this._pinnedLoadedPoints());
+    for (const key of this._pinnedKeys) {
+      keep.add(key);
+    }
+    return keep;
+  }
+
+  /** Points of the loaded nodes {@link loadRegion} pinned. */
+  private _pinnedLoadedPoints(): number {
+    let points = 0;
+    for (const key of this._pinnedKeys) {
+      const node = this._nodeCache.get(key);
+      if (node?.state === 'loaded' && node.bufferStartIndex !== undefined) {
+        points += node.pointCount;
+      }
+    }
+    return points;
   }
 
   /**
@@ -706,18 +789,28 @@ export class CopcStreamingLoader {
     // A region load has sized its request against the free buffer space;
     // viewport nodes wait until it finishes.
     if (this._paused || this._regionLoading) return;
+    // Eviction plans with this budget too, so a node too big for it can't block the queue.
+    const unpinnedBudget = this._options.pointBudget - this._pinnedLoadedPoints();
     while (
       this._loadingQueue.length > 0 &&
       this._activeRequests < this._options.maxConcurrentRequests &&
       this._totalLoadedPoints < this._options.pointBudget
     ) {
-      const node = this._loadingQueue.shift()!;
+      // Left queued if it doesn't fit, so it loads once the budget allows.
+      const node = this._loadingQueue[0];
+
+      // A node larger than what pinned nodes leave of the budget can't load while they're pinned.
+      if (node.pointCount > unpinnedBudget) {
+        this._loadingQueue.shift();
+        continue;
+      }
 
       // Check if loading this node would exceed budget
       if (this._totalLoadedPoints + node.pointCount > this._options.pointBudget) {
         this._emit('budgetreached', this._getProgressEvent());
         break;
       }
+      this._loadingQueue.shift();
 
       // Start loading node (don't await, let multiple load in parallel)
       this._loadNode(node);
@@ -737,16 +830,15 @@ export class CopcStreamingLoader {
     );
 
     for (const node of this._loadingQueue) {
-      const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-      const depth = node.keyArray[0];
-      node.priority = nodeLoadPriority(depth, distPriority);
+      node.priority = this._nodeLoadPriority(node, viewport);
     }
 
     this._loadingQueue.sort(compareNodePriority);
   }
 
   /**
-   * Evicts loaded nodes outside the current viewport and compacts point buffers.
+   * Evicts loaded nodes outside the current viewport, and those that no longer fit the
+   * point budget, and compacts point buffers. Pinned nodes are always kept.
    * Hierarchy metadata is kept so evicted nodes can be loaded again later.
    *
    * @param viewport - Current viewport information
@@ -757,21 +849,7 @@ export class CopcStreamingLoader {
     if (this._paused) return false;
     if (this._activeRequests > 0 || this._regionLoading) return false;
 
-    const loadedNodes = Array.from(this._nodeCache.values())
-      .filter((node) => node.state === 'loaded' && node.bufferStartIndex !== undefined);
-    if (loadedNodes.length === 0) return true;
-
-    return this._compactKeeping(
-      new Set(
-        loadedNodes
-          .filter(
-            (node) =>
-              this._pinnedKeys.has(node.key) ||
-              this._boundsIntersectsViewport(node.boundsWgs84, viewport)
-          )
-          .map((node) => node.key)
-      )
-    );
+    return this._compactKeeping(this._loadedKeysToKeep(viewport));
   }
 
   /**
@@ -820,6 +898,7 @@ export class CopcStreamingLoader {
       this._emit('progress', this._getProgressEvent());
       this._scheduleLayerUpdate();
     }
+    this._fitCapacity();
 
     return true;
   }
@@ -996,6 +1075,7 @@ export class CopcStreamingLoader {
     this._totalLoadedPoints += node.pointCount; // Reserve space immediately
 
     try {
+      this._ensureCapacity(this._totalLoadedPoints);
       const hierarchyNode: Hierarchy.Node = {
         pointCount: node.pointCount,
         pointDataOffset: node.pointDataOffset,
@@ -1018,7 +1098,7 @@ export class CopcStreamingLoader {
             const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
             this._extraAttributes[dimName] = createAttributeArray(
               config.arrayType,
-              this._options.pointBudget
+              this._capacity
             );
           }
         }

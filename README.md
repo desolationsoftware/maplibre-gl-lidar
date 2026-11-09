@@ -620,8 +620,8 @@ const lidarControl = new LidarControl({
   tileSource: {
     url: "https://example.com/tiles/{z}/{x}/{y}.copc.laz", // XYZ scheme
     tileZoom: 14, // Zoom the tiles are published at
-    minZoom: 16, // Map zoom below which all tiles unload
-    maxResidentTiles: 8, // Tiles loaded at once; each gets streamingPointBudget
+    minZoom: 15, // Map zoom below which all tiles unload
+    pointBudget: 80_000_000, // Shared equally across loaded tiles
   },
 });
 
