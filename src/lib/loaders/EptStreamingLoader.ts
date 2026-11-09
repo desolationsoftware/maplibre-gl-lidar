@@ -169,6 +169,8 @@ export class EptStreamingLoader {
 
   // Batched layer update
   private _pendingLayerUpdate: boolean = false;
+  /** First point written since the last layer update, so the layer only rebuilds what changed */
+  private _changedFrom: number = 0;
   private _updateBatchTimeout: ReturnType<typeof setTimeout> | null = null;
   private _onPointsLoaded?: (data: PointCloudData) => void;
   private _isResetting: boolean = false;
@@ -865,6 +867,7 @@ export class EptStreamingLoader {
    * @param pointCount - Number of points to copy
    */
   private _copyNodeBufferRange(fromStart: number, toStart: number, pointCount: number): void {
+    this._markChanged(toStart);
     this._positions!.copyWithin(toStart * 3, fromStart * 3, (fromStart + pointCount) * 3);
     this._intensities!.copyWithin(toStart, fromStart, fromStart + pointCount);
     this._classifications!.copyWithin(toStart, fromStart, fromStart + pointCount);
@@ -981,6 +984,7 @@ export class EptStreamingLoader {
         // Binary format - parse directly
         this._decodeBinaryNode(buffer, node, startIndex);
       }
+      this._markChanged(startIndex);
 
       node.state = 'loaded';
       this._totalLoadedNodes++;
@@ -1065,6 +1069,7 @@ export class EptStreamingLoader {
       const from = node.bufferStartIndex!;
       if (from !== next) {
         const count = node.pointCount;
+        this._markChanged(next);
         this._positions!.copyWithin(next * 3, from * 3, (from + count) * 3);
         this._intensities!.copyWithin(next, from, from + count);
         this._classifications!.copyWithin(next, from, from + count);
@@ -1294,11 +1299,20 @@ export class EptStreamingLoader {
   }
 
   /**
+   * Records that points from `start` on were written, for the next layer update.
+   */
+  private _markChanged(start: number): void {
+    this._changedFrom = Math.min(this._changedFrom, start);
+  }
+
+  /**
    * Performs the layer update callback.
    */
   private _performLayerUpdate(): void {
     if (this._onPointsLoaded) {
       const data = this.getLoadedPointCloudData();
+      data.changedFrom = Math.min(this._changedFrom, data.pointCount);
+      this._changedFrom = Infinity;
       this._onPointsLoaded(data);
     }
   }
@@ -1588,6 +1602,7 @@ export class EptStreamingLoader {
 
     this._loadingQueue = [];
     this._totalLoadedPoints = 0;
+    this._markChanged(0);
     this._totalLoadedNodes = 0;
 
     for (const [, node] of this._nodeCache) {

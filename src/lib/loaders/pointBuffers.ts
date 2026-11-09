@@ -24,10 +24,10 @@ export function grownCapacity(capacity: number, needed: number, budget: number):
  * the budget or for what they hold. Returns `capacity` when no shrink is warranted.
  */
 export function fittedCapacity(capacity: number, used: number, budget: number): number {
-  if (capacity <= budget && used * 4 >= capacity) {
+  if (capacity <= budget && used * 8 >= capacity) {
     return capacity;
   }
-  const target = Math.max(used, Math.min(budget, Math.max(used * 2, MIN_BUFFER_CAPACITY)));
+  const target = Math.max(used, Math.min(budget, Math.max(used * 4, MIN_BUFFER_CAPACITY)));
   return Math.min(capacity, target);
 }
 
