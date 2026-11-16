@@ -5,8 +5,9 @@ import type { EptCachedNode, EptDimension, EptHierarchy, EptMetadata, ParsedDime
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
 import { getLazPerf } from './CopcStreamingLoader';
-import { clampLatLng, compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
+import { type BudgetCandidate, clampLatLng, compareNodePriority, loadedKeysWithinBudget, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
 import { copyViewPoints, type PointTarget } from './viewPoints';
+import { fittedCapacity, grownCapacity, initialCapacity, resizedArray } from './pointBuffers';
 
 /**
  * Configuration for attribute storage types
@@ -65,6 +66,9 @@ function createAttributeArray(type: AttributeConfig['arrayType'], length: number
     default: return new Float32Array(length);
   }
 }
+
+/** How long a node that failed to load waits before it is tried again. */
+const NODE_RETRY_COOLDOWN_MS = 5000;
 
 /** copc.js's Las.Header.parse requires at least the length of a LAS 1.4 header. */
 const MIN_LAS_HEADER_LENGTH = 375;
@@ -168,6 +172,8 @@ export class EptStreamingLoader {
   private _nodeCache: Map<string, EptCachedNode> = new Map();
 
   // Point data buffers
+  /** Points the buffers have room for. Grows as points load and shrinks on eviction. */
+  private _capacity: number = 0;
   private _positions: Float32Array | null = null;
   private _colors: Uint8Array | null = null;
   private _intensities: Float32Array | null = null;
@@ -451,12 +457,49 @@ export class EptStreamingLoader {
    * Pre-allocates buffers for the point budget.
    */
   private _allocateBuffers(): void {
-    const budget = this._options.pointBudget;
-    this._positions = new Float32Array(budget * 3);
-    this._intensities = new Float32Array(budget);
-    this._classifications = new Uint8Array(budget);
+    const capacity = initialCapacity(this._options.pointBudget);
+    this._positions = new Float32Array(capacity * 3);
+    this._intensities = new Float32Array(capacity);
+    this._classifications = new Uint8Array(capacity);
     if (this._hasColor) {
-      this._colors = new Uint8Array(budget * 4);
+      this._colors = new Uint8Array(capacity * 4);
+    }
+    this._capacity = capacity;
+  }
+
+  /**
+   * Reallocates the buffers to hold `capacity` points, keeping every reserved point. Only
+   * safe between writes: decodes look the buffers up when they copy points in.
+   */
+  private _resizeBuffers(capacity: number): void {
+    const keep = this._totalLoadedPoints;
+    this._positions = resizedArray(this._positions!, capacity * 3, keep * 3);
+    this._intensities = resizedArray(this._intensities!, capacity, keep);
+    this._classifications = resizedArray(this._classifications!, capacity, keep);
+    if (this._colors) {
+      this._colors = resizedArray(this._colors, capacity * 4, keep * 4);
+    }
+    for (const [ name, arr ] of Object.entries(this._extraAttributes)) {
+      this._extraAttributes[name] = resizedArray(arr, capacity, keep);
+    }
+    this._capacity = capacity;
+  }
+
+  /** Grows the buffers, if needed, to hold `needed` points. */
+  private _ensureCapacity(needed: number): void {
+    const capacity = grownCapacity(this._capacity, needed, this._options.pointBudget);
+    if (capacity !== this._capacity) {
+      this._resizeBuffers(capacity);
+    }
+  }
+
+  /** Shrinks the buffers once they are oversized for the loaded points or the budget. */
+  private _fitCapacity(): void {
+    const capacity = fittedCapacity(this._capacity, this._totalLoadedPoints, this._options.pointBudget);
+    if (capacity !== this._capacity) {
+      this._resizeBuffers(capacity);
+      // The layer holds views of the old buffers until it's updated.
+      this._scheduleLayerUpdate();
     }
   }
 
@@ -738,36 +781,14 @@ export class EptStreamingLoader {
 
     // Second pass: collect loadable nodes
     const nodesToLoad: EptCachedNode[] = [];
-    const retryCooldownMs = 5000; // Wait 5 seconds before retrying failed nodes
 
     for (const [, node] of this._nodeCache) {
-      const depth = node.keyArray[0];
-
-      // Skip subtree placeholders (they have no point data)
-      if (node.state === 'subtree') continue;
-
-      // Skip permanently failed nodes
-      if (node.state === 'error') continue;
-
-      // Skip nodes that recently failed (cooldown period)
-      if (node.lastFailedAt && (now - node.lastFailedAt) < retryCooldownMs) {
-        continue;
-      }
-
-      // Skip nodes deeper than we need
-      // Use +2 to allow loading slightly more detailed nodes for better coverage
-      if (depth > targetDepth + 2) continue;
-
-      // Check viewport intersection
-      if (!this._boundsIntersectsViewport(node.boundsWgs84, viewport)) {
-        continue;
-      }
+      if (!this._viewportWantsNode(node, viewport, now)) continue;
 
       // Add to load list if not already loaded/loading
       if (node.state !== 'loaded' && node.state !== 'loading') {
         // Coarse-to-fine, then nearest-first within a depth
-        const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-        node.priority = nodeLoadPriority(depth, distPriority);
+        node.priority = this._nodeLoadPriority(node, viewport);
         nodesToLoad.push(node);
       }
     }
@@ -776,6 +797,48 @@ export class EptStreamingLoader {
     nodesToLoad.sort(compareNodePriority);
 
     return nodesToLoad;
+  }
+
+  /**
+   * Whether a node is one the viewport loads: it holds points, hasn't failed recently,
+   * intersects the viewport and is no deeper than the viewport needs.
+   */
+  private _viewportWantsNode(node: EptCachedNode, viewport: ViewportInfo, now: number): boolean {
+    // Subtree placeholders have no point data
+    if (node.state === 'subtree' || node.state === 'error') return false;
+    if (node.lastFailedAt && (now - node.lastFailedAt) < NODE_RETRY_COOLDOWN_MS) return false;
+    // +2 loads slightly more detailed nodes for better coverage
+    if (node.keyArray[0] > viewport.targetDepth + 2) return false;
+    return this._boundsIntersectsViewport(node.boundsWgs84, viewport);
+  }
+
+  /** Coarse-to-fine, then nearest the viewport center first within a depth. */
+  private _nodeLoadPriority(node: EptCachedNode, viewport: ViewportInfo): number {
+    return nodeLoadPriority(node.keyArray[0], this._calculateNodePriority(node.boundsWgs84, viewport));
+  }
+
+  /**
+   * Loaded nodes worth keeping: those in view that still fit the point budget when every
+   * node the viewport wants is taken in load order. Deeper nodes give way to coarser ones.
+   */
+  private _loadedKeysToKeep(viewport: ViewportInfo): Set<string> {
+    const now = Date.now();
+    const candidates: BudgetCandidate[] = [];
+    for (const node of this._nodeCache.values()) {
+      const loaded = node.state === 'loaded' && node.bufferStartIndex !== undefined;
+      const wanted = loaded
+        ? this._boundsIntersectsViewport(node.boundsWgs84, viewport)
+        : node.state === 'pending' && this._viewportWantsNode(node, viewport, now);
+      if (wanted) {
+        candidates.push({
+          key: node.key,
+          pointCount: node.pointCount,
+          priority: this._nodeLoadPriority(node, viewport),
+          loaded,
+        });
+      }
+    }
+    return loadedKeysWithinBudget(candidates, this._options.pointBudget);
   }
 
   /**
@@ -792,7 +855,8 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Evicts loaded nodes outside the current viewport and compacts point buffers.
+   * Evicts loaded nodes outside the current viewport, and those that no longer fit the
+   * point budget, and compacts point buffers.
    * Hierarchy metadata is kept so evicted nodes can be loaded again later.
    *
    * @param viewport - Current viewport information
@@ -803,17 +867,10 @@ export class EptStreamingLoader {
       return false;
     }
 
-    const loadedNodes = Array.from(this._nodeCache.values()).filter(
-      (node) => node.state === 'loaded' && node.bufferStartIndex !== undefined,
-    );
-    if (loadedNodes.length === 0) {
-      return true;
-    }
-
-    const keepNodes = loadedNodes
-      .filter((node) => this._boundsIntersectsViewport(node.boundsWgs84, viewport))
+    const keepNodeKeys = this._loadedKeysToKeep(viewport);
+    const keepNodes = Array.from(this._nodeCache.values())
+      .filter((node) => node.state === 'loaded' && node.bufferStartIndex !== undefined && keepNodeKeys.has(node.key))
       .sort((a, b) => a.bufferStartIndex! - b.bufferStartIndex!);
-    const keepNodeKeys = new Set(keepNodes.map((node) => node.key));
 
     let nextStart = 0;
     for (const node of keepNodes) {
@@ -850,6 +907,7 @@ export class EptStreamingLoader {
       this._emit('progress', this._getProgressEvent());
       this._scheduleLayerUpdate();
     }
+    this._fitCapacity();
 
     return true;
   }
@@ -903,13 +961,21 @@ export class EptStreamingLoader {
       this._activeFetches < this._options.maxConcurrentRequests &&
       this._totalLoadedPoints + this._fetchingPoints < this._options.pointBudget
     ) {
-      const node = this._loadingQueue.shift()!;
+      // Left queued if it doesn't fit, so it loads once the budget allows.
+      const node = this._loadingQueue[0];
+
+      // A node larger than the whole budget can never load.
+      if (node.pointCount > this._options.pointBudget) {
+        this._loadingQueue.shift();
+        continue;
+      }
 
       if (this._totalLoadedPoints + this._fetchingPoints + node.pointCount > this._options.pointBudget) {
         this._emit('budgetreached', this._getProgressEvent());
         break;
       }
 
+      this._loadingQueue.shift();
       this._loadNode(node);
     }
   }
@@ -952,6 +1018,7 @@ export class EptStreamingLoader {
       fetchSlotHeld = false;
 
       const startIndex = this._totalLoadedPoints;
+      this._ensureCapacity(startIndex + node.pointCount);
       node.bufferStartIndex = startIndex;
       reservedPoints = node.pointCount;
       this._totalLoadedPoints += reservedPoints;
@@ -1130,14 +1197,14 @@ export class EptStreamingLoader {
           const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
           this._extraAttributes[dimName] = createAttributeArray(
             config.arrayType,
-            this._options.pointBudget
+            this._capacity,
           );
         }
       }
       this._dimensionsDetected = true;
     }
 
-    const pointCount = Math.min(node.pointCount, this._options.pointBudget - startIndex);
+    const pointCount = Math.min(node.pointCount, this._capacity - startIndex);
     copyViewPoints(view, pointCount, startIndex, this._pointTarget());
   }
 
@@ -1192,7 +1259,7 @@ export class EptStreamingLoader {
           const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
           this._extraAttributes[dimName] = createAttributeArray(
             config.arrayType,
-            this._options.pointBudget
+            this._capacity,
           );
         }
       }
@@ -1210,7 +1277,7 @@ export class EptStreamingLoader {
 
     for (let i = 0; i < node.pointCount; i++) {
       const pointIndex = startIndex + i;
-      if (pointIndex >= this._options.pointBudget) break;
+      if (pointIndex >= this._capacity) break;
 
       const byteOffset = i * this._pointByteLength;
 
@@ -1453,7 +1520,8 @@ export class EptStreamingLoader {
   setPointBudget(pointBudget: number): boolean {
     this._options.pointBudget = pointBudget;
     void this.loadQueuedNodes();
-    return this._totalLoadedPoints > pointBudget;
+    // Downloads reserve their points only once they arrive, so count them separately.
+    return this._totalLoadedPoints + this._fetchingPoints > pointBudget;
   }
 
   /**
@@ -1556,9 +1624,7 @@ export class EptStreamingLoader {
     );
 
     for (const node of this._loadingQueue) {
-      const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
-      const depth = node.keyArray[0];
-      node.priority = nodeLoadPriority(depth, distPriority);
+      node.priority = this._nodeLoadPriority(node, viewport);
     }
 
     this._loadingQueue.sort(compareNodePriority);
