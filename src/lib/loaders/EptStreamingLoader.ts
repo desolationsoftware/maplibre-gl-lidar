@@ -1,11 +1,12 @@
-import { parse } from '@loaders.gl/core';
-import { LASLoader } from '@loaders.gl/las';
+import { Las } from 'copc';
 import proj4 from 'proj4';
 import type { NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
 import type { EptCachedNode, EptDimension, EptHierarchy, EptMetadata, ParsedDimension } from './ept-types';
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
-import { compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
+import { getLazPerf } from './CopcStreamingLoader';
+import { clampLatLng, compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
+import { copyViewPoints, type PointTarget } from './viewPoints';
 
 /**
  * Configuration for attribute storage types
@@ -65,46 +66,8 @@ function createAttributeArray(type: AttributeConfig['arrayType'], length: number
   }
 }
 
-/**
- * Clamps latitude and longitude values to valid WGS84 ranges.
- * Latitude is clamped to [-90, 90] and longitude to [-180, 180].
- * Logs a warning if clamping occurs.
- *
- * @param lng - Longitude value
- * @param lat - Latitude value
- * @param context - Context string for logging (e.g., "header bounds", "node bounds")
- * @returns Clamped [lng, lat] tuple
- */
-function clampLatLng(lng: number, lat: number, context: string = ''): [number, number] {
-  let clampedLng = lng;
-  let clampedLat = lat;
-  let wasClamped = false;
-
-  if (lat > 90) {
-    clampedLat = 90;
-    wasClamped = true;
-  } else if (lat < -90) {
-    clampedLat = -90;
-    wasClamped = true;
-  }
-
-  if (lng > 180) {
-    clampedLng = 180;
-    wasClamped = true;
-  } else if (lng < -180) {
-    clampedLng = -180;
-    wasClamped = true;
-  }
-
-  if (wasClamped && context) {
-    console.warn(
-      `EPT: Clamped transformed coordinates to valid WGS84 range${context ? ` (${context})` : ''}:`,
-      `[${lng.toFixed(6)}, ${lat.toFixed(6)}] -> [${clampedLng.toFixed(6)}, ${clampedLat.toFixed(6)}]`
-    );
-  }
-
-  return [clampedLng, clampedLat];
-}
+/** copc.js's Las.Header.parse requires at least the length of a LAS 1.4 header. */
+const MIN_LAS_HEADER_LENGTH = 375;
 
 /**
  * Extracts the PROJCS section from a WKT string (handles COMPD_CS)
@@ -996,7 +959,7 @@ export class EptStreamingLoader {
       this.loadQueuedNodes();
 
       if (this._metadata?.dataType === 'laszip') {
-        // Use @loaders.gl/las to decompress LAZ files
+        // Use copc.js to decompress LAZ files
         await this._decodeLazNode(buffer, node, startIndex);
       } else {
         // Binary format - parse directly
@@ -1127,45 +1090,42 @@ export class EptStreamingLoader {
   }
 
   /**
-   * Decodes a LAZ node using @loaders.gl/las.
+   * Decodes a LAZ node using copc.js
    *
    * @param buffer - The LAZ file's bytes
-   * @param _node - Node being loaded (unused, point count from file)
+   * @param node - Node being loaded
    * @param startIndex - Starting index in buffers
    */
   private async _decodeLazNode(
     buffer: ArrayBuffer,
-    _node: EptCachedNode,
+    node: EptCachedNode,
     startIndex: number
   ): Promise<void> {
-    const data = await parse(buffer, LASLoader, {
-      las: {
-        shape: 'mesh',
-        fp64: false,
-      },
-      worker: false,
-    }) as any;
-
-    // Get point data from the loaded result (loaders.gl mesh format)
-    const positionAttr = data.attributes?.POSITION || data.attributes?.positions;
-    const positions = positionAttr?.value as Float64Array | Float32Array | undefined;
-    const colorAttr = data.attributes?.COLOR_0 || data.attributes?.colors;
-    const colors = colorAttr?.value as Uint8Array | undefined;
-
-    // loaderData contains additional attributes
-    const loaderData = data.loaderData || {};
-
-    if (!positions) {
-      throw new Error('No position data in LAZ file');
+    // Small LAS 1.2 files can be shorter than the header length copc.js requires
+    let bytes = new Uint8Array(buffer);
+    if (bytes.byteLength < MIN_LAS_HEADER_LENGTH) {
+      const padded = new Uint8Array(MIN_LAS_HEADER_LENGTH);
+      padded.set(bytes);
+      bytes = padded;
     }
+    const header = Las.Header.parse(bytes);
+    // Only node.pointCount points are reserved in the buffers for this node
+    if (header.pointCount !== node.pointCount) {
+      throw new Error(`LAZ node ${node.key} has ${header.pointCount} points, expected ${node.pointCount}`);
+    }
+    const vlrs = await Las.Vlr.walk(async (begin, end) => bytes.subarray(begin, end), header);
+    const ebVlr = Las.Vlr.find(vlrs, 'LASF_Spec', 4);
+    const eb = ebVlr
+      ? Las.ExtraBytes.parse(bytes.subarray(ebVlr.contentOffset, ebVlr.contentOffset + ebVlr.contentLength))
+      : [];
+    const pointData = await Las.PointData.decompressFile(bytes, await getLazPerf());
+    const view = Las.View.create(pointData, header, eb);
 
-    const actualPointCount = positions.length / 3;
-
-    // Detect extra dimensions on first node
+    // Detect extra dimensions on first node, keeping only those the EPT schema lists
     if (!this._dimensionsDetected) {
-      const availableDims = Object.keys(data.attributes || {});
-      for (const dimName of availableDims) {
-        if (!CORE_DIMENSIONS.has(dimName) && dimName !== 'POSITION' && dimName !== 'COLOR_0' && dimName !== 'positions' && dimName !== 'colors') {
+      for (const parsed of this._parsedSchema) {
+        const dimName = parsed.dimension.name;
+        if (!CORE_DIMENSIONS.has(dimName) && dimName in view.dimensions) {
           this._availableDimensions.add(dimName);
           const config = DIMENSION_CONFIGS[dimName] || { arrayType: 'float32' };
           this._extraAttributes[dimName] = createAttributeArray(
@@ -1177,56 +1137,24 @@ export class EptStreamingLoader {
       this._dimensionsDetected = true;
     }
 
-    // Get intensity and classification arrays if available
-    const intensityAttr = data.attributes?.intensity || loaderData.intensity;
-    const intensity = intensityAttr?.value as Uint16Array | undefined;
-    const classificationAttr = data.attributes?.classification || loaderData.classification;
-    const classification = classificationAttr?.value as Uint8Array | undefined;
+    const pointCount = Math.min(node.pointCount, this._options.pointBudget - startIndex);
+    copyViewPoints(view, pointCount, startIndex, this._pointTarget());
+  }
 
-    // Copy point data to our buffers
-    for (let i = 0; i < actualPointCount; i++) {
-      const pointIndex = startIndex + i;
-      if (pointIndex >= this._options.pointBudget) break;
-
-      const x = positions[i * 3];
-      const y = positions[i * 3 + 1];
-      const z = positions[i * 3 + 2];
-
-      // Transform coordinates to WGS84 if needed
-      if (this._needsTransform && this._transformer) {
-        const [rawLng, rawLat] = this._transformer([x, y]);
-        // Clamp to valid WGS84 range (silently - no logging for individual points to avoid console spam)
-        const [lng, lat] = clampLatLng(rawLng, rawLat, '');
-        this._positions![pointIndex * 3] = lng - this._coordinateOrigin[0];
-        this._positions![pointIndex * 3 + 1] = lat - this._coordinateOrigin[1];
-        this._positions![pointIndex * 3 + 2] = z * this._verticalUnitFactor;
-      } else {
-        this._positions![pointIndex * 3] = x - this._coordinateOrigin[0];
-        this._positions![pointIndex * 3 + 1] = y - this._coordinateOrigin[1];
-        this._positions![pointIndex * 3 + 2] = z;
-      }
-
-      // Intensity (normalize to 0-1)
-      if (intensity) {
-        this._intensities![pointIndex] = intensity[i] / 65535;
-      }
-
-      // Classification
-      if (classification) {
-        this._classifications![pointIndex] = classification[i];
-      }
-
-      // Colors
-      if (this._colors && colors) {
-        // loaders.gl returns RGBA colors
-        const colorStride = colors.length / actualPointCount;
-        const colorOffset = i * colorStride;
-        this._colors[pointIndex * 4] = colors[colorOffset];
-        this._colors[pointIndex * 4 + 1] = colors[colorOffset + 1];
-        this._colors[pointIndex * 4 + 2] = colors[colorOffset + 2];
-        this._colors[pointIndex * 4 + 3] = 255;
-      }
-    }
+  /**
+   * The buffers decoded points are copied into, and how to place points in them.
+   */
+  private _pointTarget(): PointTarget {
+    return {
+      positions: this._positions!,
+      intensities: this._intensities!,
+      classifications: this._classifications!,
+      colors: this._colors,
+      extraAttributes: this._extraAttributes,
+      coordinateOrigin: this._coordinateOrigin,
+      toLngLat: this._needsTransform && this._transformer ? this._transformer : null,
+      verticalUnitFactor: this._verticalUnitFactor,
+    };
   }
 
   /**

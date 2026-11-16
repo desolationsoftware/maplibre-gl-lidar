@@ -17,6 +17,45 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 /**
+ * Clamps latitude and longitude values to valid WGS84 ranges.
+ * Latitude is clamped to [-90, 90] and longitude to [-180, 180].
+ * Logs a warning if clamping occurs and a context is given.
+ *
+ * @param lng - Longitude value
+ * @param lat - Latitude value
+ * @param context - Context string for logging,  empty to clamp silently
+ * @returns Clamped [lng, lat] tuple
+ */
+export function clampLatLng(lng: number, lat: number, context: string = ''): [ number, number ] {
+  const clampedLng = clamp(lng, -180, 180);
+  const clampedLat = clamp(lat, -90, 90);
+
+  if (context && (clampedLng !== lng || clampedLat !== lat)) {
+    console.warn(
+      `Clamped transformed coordinates to valid WGS84 range (${context}):`,
+      `[${lng.toFixed(6)}, ${lat.toFixed(6)}] -> [${clampedLng.toFixed(6)}, ${clampedLat.toFixed(6)}]`,
+    );
+  }
+
+  return [ clampedLng, clampedLat ];
+}
+
+/** Folds a longitude into [-180, 180). */
+export function normalizeLng(lng: number): number {
+  return (lng % 360 + 360 + 180) % 360 - 180;
+}
+
+/**
+ * Converts a LAS color channel to 8 bits, leaving values that are already 8-bit as they are.
+ *
+ * @param value - Color channel value, 8 or 16 bit
+ * @returns The 8-bit value
+ */
+export function toUint8Color(value: number): number {
+  return value > 255 ? value >> 8 : value;
+}
+
+/**
  * Formats a numeric value with appropriate decimal places based on step size.
  *
  * @param value - The value to format

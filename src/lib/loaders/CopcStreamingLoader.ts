@@ -1,23 +1,16 @@
-import { Copc, Hierarchy, Getter } from 'copc';
 import type { Copc as CopcType } from 'copc';
+import { Copc, Getter, Hierarchy } from 'copc';
 import { createLazPerf, type LazPerf } from 'laz-perf';
 import proj4 from 'proj4';
+import type { CachedNode, NodeKey, StreamingLoaderEvent, StreamingLoaderEventHandler, StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from './streaming-types';
+import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
+import type { PointCloudBounds } from '../core/types';
+import { clampLatLng, compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
+import { copyViewPoints, type PointTarget } from './viewPoints';
 
 // Register common projected coordinate systems that might not have WKT in files
 // EPSG:2180 - ETRS89 / Poland CS92 (commonly used in Poland)
 proj4.defs('EPSG:2180', '+proj=tmerc +lat_0=0 +lon_0=19 +k=0.9993 +x_0=500000 +y_0=-5300000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs');
-import type {
-  NodeKey,
-  CachedNode,
-  StreamingLoaderOptions,
-  ViewportInfo,
-  StreamingProgressEvent,
-  StreamingLoaderEvent,
-  StreamingLoaderEventHandler,
-} from './streaming-types';
-import type { PointCloudData, ExtraPointAttributes, AttributeArray, PointNodeRange } from './types';
-import type { PointCloudBounds } from '../core/types';
-import { compareNodePriority, nodeLoadPriority, VIEWPORT_BUFFER_FACTOR } from '../utils/helpers';
 
 /**
  * Source type for streaming loader - can be URL, File, or ArrayBuffer
@@ -94,17 +87,10 @@ function createAttributeArray(type: AttributeConfig['arrayType'], length: number
   }
 }
 
-/**
- * Prevents 8bit double cast
- */
-function toUint8Color(value: number): number {
-  return value > 255 ? value >> 8 : value;
-}
-
 // LazPerf instance for COPC decompression
 let lazPerfInstance: LazPerf | null = null;
 
-async function getLazPerf(): Promise<LazPerf> {
+export async function getLazPerf(): Promise<LazPerf> {
   if (!lazPerfInstance) {
     lazPerfInstance = await createLazPerf({
       locateFile: (path: string) => {
@@ -173,47 +159,6 @@ function getVerticalUnitConversionFactor(wkt: string): number {
   }
 
   return 1.0;
-}
-
-/**
- * Clamps latitude and longitude values to valid WGS84 ranges.
- * Latitude is clamped to [-90, 90] and longitude to [-180, 180].
- * Logs a warning if clamping occurs.
- *
- * @param lng - Longitude value
- * @param lat - Latitude value
- * @param context - Context string for logging (e.g., "header bounds", "node bounds")
- * @returns Clamped [lng, lat] tuple
- */
-function clampLatLng(lng: number, lat: number, context: string = ''): [number, number] {
-  let clampedLng = lng;
-  let clampedLat = lat;
-  let wasClamped = false;
-
-  if (lat > 90) {
-    clampedLat = 90;
-    wasClamped = true;
-  } else if (lat < -90) {
-    clampedLat = -90;
-    wasClamped = true;
-  }
-
-  if (lng > 180) {
-    clampedLng = 180;
-    wasClamped = true;
-  } else if (lng < -180) {
-    clampedLng = -180;
-    wasClamped = true;
-  }
-
-  if (wasClamped) {
-    console.warn(
-      `COPC: Clamped transformed coordinates to valid WGS84 range${context ? ` (${context})` : ''}:`,
-      `[${lng.toFixed(6)}, ${lat.toFixed(6)}] -> [${clampedLng.toFixed(6)}, ${clampedLat.toFixed(6)}]`
-    );
-  }
-
-  return [clampedLng, clampedLat];
 }
 
 /**
@@ -1081,7 +1026,7 @@ export class CopcStreamingLoader {
       }
 
       // Extract point data into buffers (using pre-reserved startIndex)
-      await this._extractPointData(view, node, startIndex);
+      copyViewPoints(view, node.pointCount, startIndex, this._pointTarget());
 
       node.state = 'loaded';
       this._totalLoadedNodes++;
@@ -1110,82 +1055,19 @@ export class CopcStreamingLoader {
   }
 
   /**
-   * Extracts point data from a view into the buffers.
-   *
-   * @param view - Point data view from copc.js
-   * @param node - Node being loaded
-   * @param startIndex - Starting index in buffers
+   * The buffers decoded points are copied into, and how to place points in them.
    */
-  private async _extractPointData(
-    view: Awaited<ReturnType<typeof Copc.loadPointDataView>>,
-    node: CachedNode,
-    startIndex: number
-  ): Promise<void> {
-    const xGetter = view.getter('X');
-    const yGetter = view.getter('Y');
-    const zGetter = view.getter('Z');
-    const intensityGetter = view.getter('Intensity');
-    const classGetter = view.getter('Classification');
-    const redGetter = this._hasColor ? view.getter('Red') : null;
-    const greenGetter = this._hasColor ? view.getter('Green') : null;
-    const blueGetter = this._hasColor ? view.getter('Blue') : null;
-
-    // Build getters for extra dimensions
-    const extraGetters: Map<string, (i: number) => number> = new Map();
-    for (const dimName of this._availableDimensions) {
-      try {
-        const getter = view.getter(dimName);
-        if (getter) {
-          extraGetters.set(dimName, getter);
-        }
-      } catch {
-        // Dimension not available in this node
-      }
-    }
-
-    for (let i = 0; i < node.pointCount; i++) {
-      const pointIndex = startIndex + i;
-
-      const x = xGetter(i);
-      const y = yGetter(i);
-      const z = zGetter(i);
-
-      // Transform coordinates to WGS84 if needed
-      if (this._needsTransform && this._transformer) {
-        const [rawLng, rawLat] = this._transformer([x, y]);
-        // Clamp to valid WGS84 range (silently - no logging for individual points to avoid console spam)
-        const [lng, lat] = clampLatLng(rawLng, rawLat, '');
-        this._positions![pointIndex * 3] = lng - this._coordinateOrigin[0];
-        this._positions![pointIndex * 3 + 1] = lat - this._coordinateOrigin[1];
-        this._positions![pointIndex * 3 + 2] = z * this._verticalUnitFactor;
-      } else {
-        this._positions![pointIndex * 3] = x - this._coordinateOrigin[0];
-        this._positions![pointIndex * 3 + 1] = y - this._coordinateOrigin[1];
-        this._positions![pointIndex * 3 + 2] = z;
-      }
-
-      // Intensity (normalize to 0-1)
-      this._intensities![pointIndex] = intensityGetter(i) / 65535;
-
-      // Classification
-      this._classifications![pointIndex] = classGetter(i);
-
-      // Color (if available)
-      if (this._colors && redGetter && greenGetter && blueGetter) {
-        this._colors[pointIndex * 4] = toUint8Color(redGetter(i));
-        this._colors[pointIndex * 4 + 1] = toUint8Color(greenGetter(i));
-        this._colors[pointIndex * 4 + 2] = toUint8Color(blueGetter(i));
-        this._colors[pointIndex * 4 + 3] = 255;
-      }
-
-      // Extra attributes
-      for (const [dimName, getter] of extraGetters) {
-        const arr = this._extraAttributes[dimName];
-        if (arr) {
-          arr[pointIndex] = getter(i);
-        }
-      }
-    }
+  private _pointTarget(): PointTarget {
+    return {
+      positions: this._positions!,
+      intensities: this._intensities!,
+      classifications: this._classifications!,
+      colors: this._colors,
+      extraAttributes: this._extraAttributes,
+      coordinateOrigin: this._coordinateOrigin,
+      toLngLat: this._needsTransform && this._transformer ? this._transformer : null,
+      verticalUnitFactor: this._verticalUnitFactor,
+    };
   }
 
   /**
