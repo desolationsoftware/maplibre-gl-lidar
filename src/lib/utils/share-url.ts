@@ -179,6 +179,10 @@ export function createLidarSharePayload(
   const sources = new Set<string>();
 
   for (const pointCloud of state.pointClouds) {
+    // Machine-managed datasets are recreated by whatever manages them, not restored.
+    if (pointCloud.internal) {
+      continue;
+    }
     const source = normalizePointCloudSource(pointCloud.source, baseUrl);
     if (source) {
       sources.add(source);

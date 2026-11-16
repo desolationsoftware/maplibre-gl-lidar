@@ -24,6 +24,7 @@ export interface PanelBuilderCallbacks {
   onElevationRangeChange: (range: [number, number] | null) => void;
   onFilterRangeChange: (range: [ number, number ] | null) => void;
   onPickableChange: (pickable: boolean) => void;
+  onTileModeChange?: (enabled: boolean) => void;
   onZOffsetEnabledChange: (enabled: boolean) => void;
   onZOffsetChange: (offset: number) => void;
   onTerrainChange: (enabled: boolean) => void;
@@ -71,6 +72,8 @@ export class PanelBuilder {
   private _filterCheckbox?: HTMLInputElement;
   private _filterSliderContainer?: HTMLElement;
   private _filterRangeContainer?: HTMLElement;
+  private _tileModeCheckbox?: HTMLInputElement;
+  private _tileModeGroup?: HTMLElement;
   private _zOffsetCheckbox?: HTMLInputElement;
   private _zOffsetSlider?: RangeSlider;
   private _zOffsetSliderContainer?: HTMLElement;
@@ -214,6 +217,14 @@ export class PanelBuilder {
     // Update pickable checkbox
     if (this._pickableCheckbox) {
       this._pickableCheckbox.checked = state.pickable ?? false;
+    }
+
+    // Update tile mode checkbox
+    if (this._tileModeCheckbox) {
+      this._tileModeCheckbox.checked = this._state.tileMode ?? false;
+    }
+    if (this._tileModeGroup) {
+      this._tileModeGroup.style.display = this._state.tileModeAvailable ? '' : 'none';
     }
 
     // Update Z offset controls
@@ -537,6 +548,9 @@ export class PanelBuilder {
     });
     section.appendChild(this._opacitySlider.render());
 
+    // Tile Mode toggle
+    section.appendChild(this._buildTileModeCheckbox());
+
     // 3D Terrain toggle
     section.appendChild(this._buildTerrainCheckbox());
 
@@ -849,6 +863,46 @@ export class PanelBuilder {
   }
 
   /**
+   * Builds the "follow map" toggle, which turns tile-driven loading on and off.
+   */
+  private _buildTileModeCheckbox(): HTMLElement {
+    const group = document.createElement('div');
+    group.className = 'lidar-control-group';
+    // Only offered once a tile source URL is configured.
+    group.style.display = this._state.tileModeAvailable ? '' : 'none';
+    this._tileModeGroup = group;
+
+    const labelRow = document.createElement('div');
+    labelRow.className = 'lidar-control-label-row';
+    labelRow.style.cursor = 'pointer';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.id = 'lidar-tilemode-checkbox';
+    checkbox.checked = this._state.tileMode ?? false;
+    checkbox.style.marginRight = '6px';
+    this._tileModeCheckbox = checkbox;
+
+    const label = document.createElement('label');
+    label.className = 'lidar-control-label';
+    label.htmlFor = 'lidar-tilemode-checkbox';
+    label.style.display = 'inline';
+    label.style.cursor = 'pointer';
+    label.textContent = 'Follow map';
+    label.title = 'Load point cloud tiles automatically as the map moves';
+
+    labelRow.appendChild(checkbox);
+    labelRow.appendChild(label);
+    group.appendChild(labelRow);
+
+    checkbox.addEventListener('change', () => {
+      this._callbacks.onTileModeChange?.(checkbox.checked);
+    });
+
+    return group;
+  }
+
+  /**
    * Gets the elevation bounds from loaded point clouds.
    */
   private _getElevationBounds(): { min: number; max: number } {
@@ -1138,7 +1192,22 @@ export class PanelBuilder {
       return;
     }
 
-    for (const pc of this._state.pointClouds) {
+    // Tiles arrive a dozen at a time and are not individually actionable, so they are
+    // summarized as one row rather than flooding the list.
+    const tileClouds = this._state.pointClouds.filter((pc) => pc.internal);
+    const userClouds = this._state.pointClouds.filter((pc) => !pc.internal);
+
+    if (tileClouds.length > 0) {
+      const points = tileClouds.reduce((total, pc) => total + pc.pointCount, 0);
+      const summary = document.createElement('div');
+      summary.className = 'lidar-pointcloud-item';
+      summary.textContent =
+        `Following map: ${tileClouds.length} tile${tileClouds.length === 1 ? '' : 's'}` +
+        ` (${points.toLocaleString()} pts)`;
+      this._pointCloudsList.appendChild(summary);
+    }
+
+    for (const pc of userClouds) {
       this._pointCloudsList.appendChild(this._buildPointCloudItem(pc));
     }
   }

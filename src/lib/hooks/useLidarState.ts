@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import type { LidarState, ColorScheme } from '../core/types';
+import { useCallback, useState } from 'react';
+import type { ColorScheme, LidarState } from '../core/types';
 
 /**
  * Default initial state for the LiDAR control
@@ -32,6 +32,8 @@ const DEFAULT_STATE: LidarState = {
   hiddenClassifications: new Set(),
   availableClassifications: new Set(),
   terrainEnabled: false,
+  tileMode: false,
+  tileModeAvailable: false,
 };
 
 /**

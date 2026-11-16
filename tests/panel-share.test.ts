@@ -31,6 +31,8 @@ function createState(): LidarState {
     hiddenClassifications: new Set(),
     availableClassifications: new Set(),
     terrainEnabled: false,
+    tileMode: false,
+    tileModeAvailable: false,
   };
 }
 
