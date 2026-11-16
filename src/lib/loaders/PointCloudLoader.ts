@@ -1,9 +1,10 @@
 import type { Copc as CopcType } from 'copc';
 import { Copc, Getter, Hierarchy, Las } from 'copc';
-import { createLazPerf, type LazPerf } from 'laz-perf';
+import type { LazPerf } from 'laz-perf';
 import { load } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import proj4 from 'proj4';
+import { getLazPerf } from './lazDecodePool';
 import type { AttributeArray, ExtraPointAttributes, PointCloudData, PointNodeRange } from './types';
 import type { PointCloudBounds } from '../core/types';
 
@@ -67,24 +68,6 @@ function createAttributeArray(type: AttributeConfig['arrayType'], length: number
     case 'int8': return new Int8Array(length);
     default: return new Float32Array(length);
   }
-}
-
-// LazPerf instance for COPC decompression
-let lazPerfInstance: LazPerf | null = null;
-
-async function getLazPerf(): Promise<LazPerf> {
-  if (!lazPerfInstance) {
-    lazPerfInstance = await createLazPerf({
-      locateFile: (path: string) => {
-        // Load WASM from CDN for reliable loading in all environments
-        if (path.endsWith('.wasm')) {
-          return 'https://unpkg.com/laz-perf@0.0.7/lib/web/laz-perf.wasm';
-        }
-        return path;
-      },
-    });
-  }
-  return lazPerfInstance;
 }
 
 /**

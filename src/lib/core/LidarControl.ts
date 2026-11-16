@@ -1,21 +1,7 @@
 import type { IControl, Map as MapLibreMap } from 'maplibre-gl';
-import type {
-  LidarControlOptions,
-  LidarState,
-  LidarControlEvent,
-  LidarControlEventHandler,
-  LidarEventData,
-  PointCloudInfo,
-  ColorScheme,
-  PointCloudLoadOptions,
-  ColormapName,
-  ColorRangeConfig,
-  PointCloudFullMetadata,
-  ElevationProfile,
-  CrossSectionLine,
-} from './types';
+import type { ColormapName, ColorRangeConfig, ColorScheme, CrossSectionLine, ElevationProfile, LidarControlEvent, LidarControlEventHandler, LidarControlOptions, LidarEventData, LidarState, PointCloudFullMetadata, PointCloudInfo, PointCloudLoadOptions } from './types';
 import type { PickedPointInfo } from '../layers/types';
-import type { StreamingLoaderOptions, ViewportInfo, StreamingProgressEvent } from '../loaders/streaming-types';
+import type { StreamingLoaderOptions, StreamingProgressEvent, ViewportInfo } from '../loaders/streaming-types';
 import type { PointCloudData } from '../loaders/types';
 import { DeckOverlay } from './DeckOverlay';
 import { PointCloudLoader } from '../loaders/PointCloudLoader';
@@ -29,7 +15,7 @@ import { MetadataPanel } from '../gui/MetadataPanel';
 import { CrossSectionPanel } from '../gui/CrossSectionPanel';
 import { CrossSectionTool } from '../tools/CrossSectionTool';
 import { ElevationProfileExtractor } from '../tools/ElevationProfileExtractor';
-import { computePercentileBounds, generateId, getFilename, isEptUrl, boundsEqual } from '../utils/helpers';
+import { boundsEqual, computePercentileBounds, generateId, getFilename, isEptUrl } from '../utils/helpers';
 import { createLidarSharePayload, createLidarShareUrl, parseLidarSharePayloadFromUrl } from '../utils/share-url';
 import { type ClassificationStyles, colorSchemeToDomainKey, getAvailableClassifications, getClassificationName, isGradientColorScheme } from '../colorizers/ColorScheme';
 
@@ -1484,7 +1470,9 @@ export class LidarControl implements IControl {
 
       // A newer viewport update may start while this one awaits; it takes over from there.
       const isStale = () => this._eptViewportRequestIds.get(datasetId) !== currentRequestId;
-      if (isStale()) return;
+      if (isStale()) {
+        return;
+      }
 
       eptLoader.pruneQueueForViewport(viewport);
 
@@ -1501,7 +1489,9 @@ export class LidarControl implements IControl {
       }
 
       let nodesToLoad = await eptLoader.selectNodesForViewport(viewport);
-      if (isStale()) return;
+      if (isStale()) {
+        return;
+      }
 
       let resetSucceeded = false;
       const loadedPoints = eptLoader.getLoadedPointCount();
