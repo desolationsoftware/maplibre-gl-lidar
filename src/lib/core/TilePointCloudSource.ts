@@ -241,7 +241,7 @@ export class TilePointCloudSource {
       );
 
       if (this._isStale(entry)) {
-        // The tile was unloaded while its header was loading; drop what we just built.
+        // The tile was unloaded while its header was loading
         this._host.unloadTile(datasetId);
         return;
       }
@@ -259,7 +259,7 @@ export class TilePointCloudSource {
     }
   }
 
-  /** Each loaded or loading tile's equal share of the point budget. */
+  /** Each tile's equal share of the point budget. */
   private _tileBudget(): number {
     let tiles = 0;
     for (const entry of this._tiles.values()) {

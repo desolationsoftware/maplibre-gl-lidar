@@ -119,7 +119,7 @@ export function enumerateTileRange(
 
 /**
  * Squared planar distance from a point to a tile's center, with longitude scaled by
- * cos(latitude). Only meaningful for ordering.
+ * cos(latitude). Used for ordering.
  */
 export function tileDistanceFrom(tile: TileId, center: [ number, number ]): number {
   const [ tileLng, tileLat ] = tileCenter(tile);
