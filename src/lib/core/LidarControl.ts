@@ -1507,7 +1507,6 @@ export class LidarControl implements IControl {
       let resetSucceeded = false;
       const loadedPoints = eptLoader.getLoadedPointCount();
       const pointBudget = eptLoader.getPointBudget();
-      // Until eviction runs, the loaded count includes out-of-view nodes, so it can't be trusted.
       const budgetReached = evictSucceeded && loadedPoints >= pointBudget * 0.8; // 80% threshold
       const minDepthForCoverage = Math.max(0, viewport.targetDepth - 2);
 

@@ -20,8 +20,8 @@ export function grownCapacity(capacity: number, needed: number, budget: number):
 }
 
 /**
- * Capacity to shrink buffers holding `used` points to once they are oversized, either for
- * the budget or for what they hold. Returns `capacity` when no shrink is warranted.
+ * Capacity to shrink buffers holding `used` points to once they are oversized.
+ * Shrink the capacity if an array is more than 4x larger than the number of points it stores.
  */
 export function fittedCapacity(capacity: number, used: number, budget: number): number {
   if (capacity <= budget && used * 4 >= capacity) {
