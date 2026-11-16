@@ -167,6 +167,8 @@ export class CopcStreamingLoader {
 
   // Batched layer update
   private _pendingLayerUpdate: boolean = false;
+  /** First point written since the last layer update, so the layer only rebuilds what changed */
+  private _changedFrom: number = 0;
   private _updateBatchTimeout: ReturnType<typeof setTimeout> | null = null;
   private _onPointsLoaded?: (data: PointCloudData) => void;
 
@@ -842,6 +844,7 @@ export class CopcStreamingLoader {
 
     this._loadingQueue = [];
     this._totalLoadedPoints = 0;
+    this._markChanged(0);
     this._totalLoadedNodes = 0;
 
     for (const node of this._nodeCache.values()) {
@@ -972,6 +975,7 @@ export class CopcStreamingLoader {
    * @param pointCount - Number of points to copy
    */
   private _copyNodeBufferRange(fromStart: number, toStart: number, pointCount: number): void {
+    this._markChanged(toStart);
     this._positions!.copyWithin(toStart * 3, fromStart * 3, (fromStart + pointCount) * 3);
     this._intensities!.copyWithin(toStart, fromStart, fromStart + pointCount);
     this._classifications!.copyWithin(toStart, fromStart, fromStart + pointCount);
@@ -1044,6 +1048,7 @@ export class CopcStreamingLoader {
       }
 
       writeDecodedPoints(decoded, startIndex, this._pointBuffers());
+      this._markChanged(startIndex);
 
       node.state = 'loaded';
       this._totalLoadedNodes++;
@@ -1103,11 +1108,20 @@ export class CopcStreamingLoader {
   }
 
   /**
+   * Records that points from `start` on were written, for the next layer update.
+   */
+  private _markChanged(start: number): void {
+    this._changedFrom = Math.min(this._changedFrom, start);
+  }
+
+  /**
    * Performs the layer update callback.
    */
   private _performLayerUpdate(): void {
     if (this._onPointsLoaded) {
       const data = this.getLoadedPointCloudData();
+      data.changedFrom = Math.min(this._changedFrom, data.pointCount);
+      this._changedFrom = Infinity;
       this._onPointsLoaded(data);
     }
   }

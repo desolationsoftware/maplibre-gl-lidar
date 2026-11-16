@@ -6,6 +6,7 @@ import type { PointCloudData } from '../loaders/types';
 import type { ColormapName, ColorRangeConfig, ColorScheme, PointCloudBounds } from '../core/types';
 import type { PickedPointInfo, PointCloudLayerOptions } from './types';
 import { ColorSchemeProcessor, getSchemeFilterValues } from '../colorizers/ColorScheme';
+import { resizedArray } from '../loaders/pointBuffers';
 
 // Web Mercator ground resolution at zoom 0 (meters/pixel at the equator) for a 512px tile.
 const WEB_MERCATOR_METERS_PER_PIXEL_AT_ZOOM_0 = 78271.51696402048;
@@ -26,19 +27,66 @@ function pointSizeMeters(
 }
 
 /**
+ * Chunk size - 1 million points per layer to stay within WebGL limits
+ */
+const CHUNK_SIZE = 1000000;
+
+/**
+ * `colors` when it holds `length` to twice `length` bytes, otherwise a resized array with its
+ * first `keep` bytes. Grows by half again, so the colors of a streamed cloud aren't reallocated
+ * every update, and shrinks to `length` once oversized, so they follow a shrunk positions buffer.
+ */
+function colorsWithCapacity(colors: Uint8Array, length: number, keep: number): Uint8Array {
+  if (colors.length >= length && colors.length <= length * 2) {
+    return colors;
+  }
+  const size = colors.length < length ? Math.max(length, Math.floor(colors.length * 1.5)) : length;
+  return resizedArray(colors, size, keep);
+}
+
+/**
+ * Data of a deck.gl chunk layer. A layer rebuilt with the same object doesn't upload it again.
+ */
+interface ChunkLayerData {
+  length: number;
+  attributes: {
+    getPosition: { value: Float32Array; size: 3 };
+    getColor: { value: Uint8Array; size: 4 };
+  };
+}
+
+/**
+ * Layer data for a chunk's positions and colors.
+ */
+function createChunkLayerData(positions: Float32Array, colors: Uint8Array): ChunkLayerData {
+  return {
+    length: positions.length / 3,
+    attributes: {
+      getPosition: { value: positions, size: 3 },
+      getColor: { value: colors, size: 4 },
+    },
+  };
+}
+
+/**
  * Internal point cloud data with computed colors
  */
 interface ManagedPointCloud {
   id: string;
   data: PointCloudData;
+  /** Per-point RGBA colors. May be longer than the data, to leave room for streamed points. */
   colors: Uint8Array;
+  /** Bounds `colors` were computed with, if the color scheme has them */
+  colorBounds?: { min: number; max: number };
   coordinateOrigin: [number, number, number]; // [lng, lat, 0] center point
   /** Per-layer visibility (default: true) */
   visible: boolean;
   /** Per-layer opacity override (null means use global) */
   opacityOverride: number | null;
-  /** Number of deck.gl chunk layers currently created for this point cloud */
-  chunkCount: number;
+  /** Data of the deck.gl chunk layers currently created for this point cloud */
+  chunkData: ChunkLayerData[];
+  /** Part of the chunk layer ids, changed whenever the point buffers are reallocated */
+  layerGeneration?: number;
   /** Full range of the gradient-colored values, if the current scheme yielded one */
   dataBounds?: { min: number; max: number };
 }
@@ -112,10 +160,11 @@ export class PointCloudManager {
       id,
       data,
       colors: result.colors,
+      colorBounds: result.bounds,
       coordinateOrigin,
       visible: true,
       opacityOverride: null,
-      chunkCount: 0,
+      chunkData: [],
       dataBounds: result.dataBounds,
     });
     this._createLayer(id);
@@ -140,7 +189,8 @@ export class PointCloudManager {
           coordinateOrigin: data.coordinateOrigin,
           visible: existing.visible,
           opacityOverride: existing.opacityOverride,
-          chunkCount: existing.chunkCount,
+          chunkData: existing.chunkData,
+          layerGeneration: existing.layerGeneration,
         });
         this._createLayer(id);
       }
@@ -148,13 +198,21 @@ export class PointCloudManager {
     }
 
     if (existing) {
-      // Recalculate colors for new data
+      // Points before `changedFrom` are as they were last update, so they keep their colors
+      // and, where a whole chunk of them is unchanged, their layer
+      const changedFrom = Math.min(data.changedFrom ?? 0, existing.data.pointCount);
+      // Colors follow the capacity of the positions buffer, so they only resize when it does
+      const capacity = Math.max(data.pointCount, data.positions.buffer.byteLength / 12);
       const result = this._colorProcessor.getColorsWithBounds(data, this._options.colorScheme, {
         usePercentile: this._options.usePercentile,
         colormap: this._options.colormap,
         colorRange: this._options.colorRange,
         hiddenClassifications: this._options.hiddenClassifications,
         classificationStyles: this._options.classificationStyles,
+      }, {
+        colors: colorsWithCapacity(existing.colors, capacity * 4, changedFrom * 4),
+        start: changedFrom,
+        bounds: existing.colorBounds,
       });
 
       // Store the computed bounds for colorbar display
@@ -166,15 +224,20 @@ export class PointCloudManager {
         id,
         data,
         colors: result.colors,
+        colorBounds: result.bounds,
         coordinateOrigin: data.coordinateOrigin,
         visible: existing.visible,
         opacityOverride: existing.opacityOverride,
-        chunkCount: existing.chunkCount,
+        chunkData: existing.chunkData,
+        layerGeneration: existing.layerGeneration,
         dataBounds: result.dataBounds,
       });
 
-      // Recreate layers with new data
-      this._createLayer(id);
+      // Recolored points need their layers rebuilt too, and every layer does once the
+      // loader or the colors reallocate their buffers, so none keeps the old ones alive
+      const sameBuffers = data.positions.buffer === existing.data.positions?.buffer &&
+        result.colors.buffer === existing.colors.buffer;
+      this._createLayer(id, sameBuffers ? result.start : 0);
     } else {
       // New point cloud - use existing addPointCloud
       this.addPointCloud(id, data);
@@ -199,10 +262,7 @@ export class PointCloudManager {
   removePointCloud(id: string): void {
     const pc = this._pointClouds.get(id);
     if (pc) {
-      // Remove all chunk layers
-      for (let chunk = 0; chunk < pc.chunkCount; chunk++) {
-        this._deckOverlay.removeLayer(`pointcloud-${id}-chunk${chunk}`);
-      }
+      this._removeChunkLayers(id, 0, pc.chunkData.length);
     }
     this._pointClouds.delete(id);
   }
@@ -251,18 +311,19 @@ export class PointCloudManager {
     const colorRangeChanged = options.colorRange !== undefined;
     const hiddenClassificationsChanged = options.hiddenClassifications !== undefined;
     const classificationStylesChanged = options.classificationStyles !== undefined;
+    const filterChanged = options.elevationRange !== undefined || options.filterRange !== undefined;
 
     this._options = { ...this._options, ...options };
 
     // If color-related settings changed, recompute colors
-    if (
+    const recolor =
       colorSchemeChanged ||
       percentileChanged ||
       colormapChanged ||
       colorRangeChanged ||
       hiddenClassificationsChanged ||
-      classificationStylesChanged
-    ) {
+      classificationStylesChanged;
+    if (recolor) {
       // Drop bounds from the previous settings, which may yield none (e.g. no
       // point cloud has the color-by attribute)
       this._lastComputedBounds = undefined;
@@ -283,6 +344,7 @@ export class PointCloudManager {
         this._pointClouds.set(id, {
           ...pc,
           colors: result.colors,
+          colorBounds: result.bounds,
           coordinateOrigin: pc.coordinateOrigin,
           visible: pc.visible,
           opacityOverride: pc.opacityOverride,
@@ -291,8 +353,9 @@ export class PointCloudManager {
       }
     }
 
-    // Recreate all layers with new options
-    this._updateAllLayers();
+    // Recreate all layers with new options. Other options change only layer props, so
+    // layers keep their data.
+    this._updateAllLayers(recolor || filterChanged ? 0 : Infinity);
   }
 
   /**
@@ -436,7 +499,7 @@ export class PointCloudManager {
     const pc = this._pointClouds.get(id);
     if (pc) {
       this._pointClouds.set(id, { ...pc, opacityOverride: opacity });
-      this._createLayer(id);
+      this._createLayer(id, Infinity);
     }
   }
 
@@ -457,10 +520,7 @@ export class PointCloudManager {
    */
   clear(): void {
     for (const [id, pc] of this._pointClouds) {
-      // Remove all chunk layers
-      for (let chunk = 0; chunk < pc.chunkCount; chunk++) {
-        this._deckOverlay.removeLayer(`pointcloud-${id}-chunk${chunk}`);
-      }
+      this._removeChunkLayers(id, 0, pc.chunkData.length);
     }
     this._pointClouds.clear();
   }
@@ -596,10 +656,23 @@ export class PointCloudManager {
    * Chunks large point clouds into multiple layers to avoid WebGL buffer limits.
    * Uses coordinateOrigin + LNGLAT_OFFSETS to maintain Float32 precision.
    * Applies the elevation filter and color scheme range filter if set.
+   *
+   * @param id - Point cloud id
+   * @param changedFrom - First point whose data or color changed since the layers were last
+   *   created, or Infinity if none did. Chunks of points before it reuse their layer data.
+   *   A filter change must pass 0, since earlier points may then filter differently.
    */
-  private _createLayer(id: string): void {
-    const pc = this._pointClouds.get(id);
+  private _createLayer(id: string, changedFrom: number = 0): void {
+    let pc = this._pointClouds.get(id);
     if (!pc) return;
+
+    // Every chunk gets new data, so the layers move to new ids: deck.gl keeps the first layer
+    // created under an id, and its data, alive for as long as the id is in use
+    if (changedFrom === 0 && pc.chunkData.length > 0) {
+      this._removeChunkLayers(id, 0, pc.chunkData.length);
+      pc = { ...pc, chunkData: [], layerGeneration: (pc.layerGeneration ?? 0) + 1 };
+      this._pointClouds.set(id, pc);
+    }
 
     const { data, colors, coordinateOrigin, visible, opacityOverride } = pc;
     const elevationRange = this._options.elevationRange;
@@ -607,14 +680,10 @@ export class PointCloudManager {
     const zOffset = this._options.zOffset ?? 0;
     const layerOpacity = opacityOverride ?? this._options.opacity;
 
-    // Remove existing chunk layers first.
-    for (let chunk = 0; chunk < pc.chunkCount; chunk++) {
-      this._deckOverlay.removeLayer(`pointcloud-${id}-chunk${chunk}`);
-    }
-
     // If layer is not visible, don't create any layers
     if (!visible) {
-      this._pointClouds.set(id, { ...pc, chunkCount: 0 });
+      this._removeChunkLayers(id, 0, pc.chunkData.length);
+      this._pointClouds.set(id, { ...pc, chunkData: [] });
       return;
     }
 
@@ -645,38 +714,61 @@ export class PointCloudManager {
 
     // If no points pass the filter, don't create any layers
     if (visibleCount === 0) {
-      this._pointClouds.set(id, { ...pc, chunkCount: 0 });
+      this._removeChunkLayers(id, 0, pc.chunkData.length);
+      this._pointClouds.set(id, { ...pc, chunkData: [] });
       return;
     }
 
-    // Chunk size - 1 million points per layer to stay within WebGL limits
-    const CHUNK_SIZE = 1000000;
     const numChunks = Math.ceil(visibleCount / CHUNK_SIZE);
+    // The Z offset is applied through the origin, so unfiltered chunks can render straight
+    // from the point cloud's arrays rather than copies of them
+    const layerOrigin: [number, number, number] = [
+      coordinateOrigin[0],
+      coordinateOrigin[1],
+      (coordinateOrigin[2] ?? 0) + zOffset,
+    ];
 
+    const chunkData: ChunkLayerData[] = [];
     for (let chunk = 0; chunk < numChunks; chunk++) {
       const chunkStart = chunk * CHUNK_SIZE;
       const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, visibleCount);
       const chunkSize = chunkEnd - chunkStart;
 
-      const chunkPositions = new Float32Array(chunkSize * 3);
-      const chunkColors = new Uint8Array(chunkSize * 4);
       // Maps an index within this chunk back to the point's index in data.
       const toSourceIndex = (chunkIndex: number): number =>
         filteredIndices != null ? filteredIndices[chunkStart + chunkIndex] : chunkStart + chunkIndex;
 
-      for (let i = 0; i < chunkSize; i++) {
-        const srcIdx = toSourceIndex(i);
+      // Unchanged since its layer was created, and that layer ends where this chunk does: reuse
+      // its data, so deck.gl doesn't upload it again. Under an unchanged filter, points before
+      // `changedFrom` filter as they did, so filtered chunks of them hold the same points.
+      const previous = pc.chunkData[chunk];
+      let layerData: ChunkLayerData;
+      if (toSourceIndex(chunkSize - 1) < changedFrom && previous?.length === chunkSize) {
+        layerData = previous;
+      } else if (filteredIndices == null) {
+        layerData = createChunkLayerData(
+          data.positions.subarray(chunkStart * 3, chunkEnd * 3),
+          colors.subarray(chunkStart * 4, chunkEnd * 4)
+        );
+      } else {
+        const chunkPositions = new Float32Array(chunkSize * 3);
+        const chunkColors = new Uint8Array(chunkSize * 4);
+        for (let i = 0; i < chunkSize; i++) {
+          const srcIdx = toSourceIndex(i);
 
-        chunkPositions[i * 3] = data.positions[srcIdx * 3];
-        chunkPositions[i * 3 + 1] = data.positions[srcIdx * 3 + 1];
-        // Apply Z offset to elevation
-        chunkPositions[i * 3 + 2] = data.positions[srcIdx * 3 + 2] + zOffset;
+          chunkPositions[i * 3] = data.positions[srcIdx * 3];
+          chunkPositions[i * 3 + 1] = data.positions[srcIdx * 3 + 1];
+          chunkPositions[i * 3 + 2] = data.positions[srcIdx * 3 + 2];
 
-        chunkColors[i * 4] = colors[srcIdx * 4];
-        chunkColors[i * 4 + 1] = colors[srcIdx * 4 + 1];
-        chunkColors[i * 4 + 2] = colors[srcIdx * 4 + 2];
-        chunkColors[i * 4 + 3] = colors[srcIdx * 4 + 3];
+          chunkColors[i * 4] = colors[srcIdx * 4];
+          chunkColors[i * 4 + 1] = colors[srcIdx * 4 + 1];
+          chunkColors[i * 4 + 2] = colors[srcIdx * 4 + 2];
+          chunkColors[i * 4 + 3] = colors[srcIdx * 4 + 3];
+        }
+        layerData = createChunkLayerData(chunkPositions, chunkColors);
       }
+      chunkData.push(layerData);
+      const chunkPositions = layerData.attributes.getPosition.value;
 
       // Describes the picked point of this chunk, or null for a miss.
       const pickedPoint = (info: PickingInfo): PickedPointInfo | null => {
@@ -687,7 +779,7 @@ export class PointCloudManager {
             index: originalIndex,
             longitude: coordinateOrigin[0] + chunkPositions[info.index * 3],
             latitude: coordinateOrigin[1] + chunkPositions[info.index * 3 + 1],
-            elevation: chunkPositions[info.index * 3 + 2],
+            elevation: chunkPositions[info.index * 3 + 2] + zOffset,
             x: info.x,
             y: info.y,
           };
@@ -735,19 +827,13 @@ export class PointCloudManager {
       // Create a unique data fingerprint to force deck.gl to update
       const elevationKey = elevationRange ? `${elevationRange[0]}-${elevationRange[1]}` : 'none';
       const filterKey = filterRange ? `${filterRange[0]}-${filterRange[1]}` : 'none';
-      const zOffsetKey = zOffset;
 
+      const layerId = this._layerId(id, chunk);
       const layer = new PointCloudLayer({
-        id: `pointcloud-${id}-chunk${chunk}`,
+        id: layerId,
         coordinateSystem: COORDINATE_SYSTEM.LNGLAT_OFFSETS,
-        coordinateOrigin: coordinateOrigin,
-        data: {
-          length: chunkSize,
-          attributes: {
-            getPosition: { value: chunkPositions, size: 3 },
-            getColor: { value: chunkColors, size: 4 },
-          },
-        },
+        coordinateOrigin: layerOrigin,
+        data: layerData,
         ...this._getPointSizeProps(coordinateOrigin[1]),
         opacity: layerOpacity,
         getNormal: [0, 0, 1],
@@ -758,15 +844,33 @@ export class PointCloudManager {
         highlightColor: [255, 255, 0, 200],
         // Force update when these values change
         updateTriggers: {
-          getPosition: [elevationKey, filterKey, zOffsetKey, chunkSize],
+          getPosition: [elevationKey, filterKey, chunkSize],
           getColor: [elevationKey, filterKey, chunkSize],
         },
       });
 
-      this._deckOverlay.addLayer(`pointcloud-${id}-chunk${chunk}`, layer);
+      this._deckOverlay.addLayer(layerId, layer);
     }
 
-    this._pointClouds.set(id, { ...pc, chunkCount: numChunks });
+    this._removeChunkLayers(id, numChunks, pc.chunkData.length);
+    this._pointClouds.set(id, { ...pc, chunkData });
+  }
+
+  /**
+   * Removes a point cloud's chunk layers `from` to `to`, exclusive.
+   */
+  private _removeChunkLayers(id: string, from: number, to: number): void {
+    for (let chunk = from; chunk < to; chunk++) {
+      this._deckOverlay.removeLayer(this._layerId(id, chunk));
+    }
+  }
+
+  /**
+   * Gets the deck.gl layer id of a point cloud's chunk.
+   */
+  private _layerId(id: string, chunk: number): string {
+    const generation = this._pointClouds.get(id)?.layerGeneration ?? 0;
+    return generation === 0 ? `pointcloud-${id}-chunk${chunk}` : `pointcloud-${id}-g${generation}-chunk${chunk}`;
   }
 
   /**
@@ -785,10 +889,12 @@ export class PointCloudManager {
 
   /**
    * Updates all layers with current options.
+   *
+   * @param changedFrom - First point whose data or color changed, or Infinity if none did
    */
-  private _updateAllLayers(): void {
+  private _updateAllLayers(changedFrom: number = 0): void {
     for (const id of this._pointClouds.keys()) {
-      this._createLayer(id);
+      this._createLayer(id, changedFrom);
     }
   }
 }
